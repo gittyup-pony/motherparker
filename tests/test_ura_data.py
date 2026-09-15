@@ -137,6 +137,44 @@ async def test_store_retries_again_once_backoff_window_passes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_log_raw_feature_sample_logs_ground_truth_for_both_datasets(monkeypatch, caplog):
+    # Regression coverage for the Render-free-tier-has-no-Shell problem:
+    # `python -m motopark_bot.ura_data` (the __main__ smoke test) can't be
+    # run interactively there, so this diagnostic logs the same
+    # information at WARNING level instead, for the (free) Logs tab.
+    seen_dataset_ids = []
+
+    async def fake_fetch_raw_geojson(dataset_id):
+        seen_dataset_ids.append(dataset_id)
+        return {
+            "type": "FeatureCollection",
+            "features": [{"type": "Feature", "properties": {"SOME_KEY": "some_value"}}],
+        }
+
+    monkeypatch.setattr(ura_data, "fetch_raw_geojson", fake_fetch_raw_geojson)
+
+    with caplog.at_level("WARNING"):
+        await ura_data.log_raw_feature_sample()
+
+    assert seen_dataset_ids == [ura_data.PARKING_LOT_DATASET_ID, ura_data.CAPACITY_DATASET_ID]
+    assert "URA diagnostic" in caplog.text
+    assert "SOME_KEY" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_log_raw_feature_sample_survives_fetch_failure(monkeypatch, caplog):
+    async def fake_fetch_raw_geojson(dataset_id):
+        raise RuntimeError("simulated network failure")
+
+    monkeypatch.setattr(ura_data, "fetch_raw_geojson", fake_fetch_raw_geojson)
+
+    with caplog.at_level("WARNING"):
+        await ura_data.log_raw_feature_sample()  # must not raise
+
+    assert "raw fetch itself failed" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_forced_refresh_ignores_backoff(monkeypatch):
     call_count = 0
 

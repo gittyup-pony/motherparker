@@ -23,10 +23,13 @@ own function for these since the *display* fields genuinely differ
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
-from motopark_bot.datagovsg import fetch_geojson_features
+from motopark_bot.datagovsg import fetch_geojson_features, fetch_raw_geojson
+
+log = logging.getLogger(__name__)
 
 PARKING_LOT_DATASET_ID = "d_d959102fa76d58f2de276bfbb7e8f68e"
 CAPACITY_DATASET_ID = "d_9bf8620ecfdc8a5f8f77e3f02160af5c"
@@ -173,6 +176,33 @@ class UraCarparkStore:
     async def all(self) -> list[UraCarpark]:
         await self.refresh()
         return list(self._carparks)
+
+
+async def log_raw_feature_sample() -> None:
+    """Diagnostic-only: log the ground-truth raw GeoJSON for both datasets.
+
+    Render's free tier has no Shell tab, so `python -m motopark_bot.ura_data`
+    (the smoke test below) isn't runnable interactively there - only the
+    Logs tab is free. This does the same fetch but writes WARNING-level log
+    lines instead of printing, so the raw feature count/geometry type/
+    properties are visible from Render's dashboard after a
+    restart/redeploy, without needing paid Shell access. Called from
+    bot.py when priming ura_store fails at startup.
+    """
+    for label, dataset_id in (("Parking Lot", PARKING_LOT_DATASET_ID), ("Capacity", CAPACITY_DATASET_ID)):
+        try:
+            raw = await fetch_raw_geojson(dataset_id)
+            features = raw.get("features", [])
+            first = features[0] if features else None
+            log.warning(
+                "URA diagnostic [%s dataset]: %d raw feature(s). Top-level keys=%s. First feature=%r",
+                label,
+                len(features),
+                sorted(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+                first,
+            )
+        except Exception:
+            log.exception("URA diagnostic [%s dataset]: raw fetch itself failed.", label)
 
 
 if __name__ == "__main__":

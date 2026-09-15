@@ -20,7 +20,7 @@ from motopark_bot.health import start_health_server
 from motopark_bot.lta_client import LiveAvailabilityStore
 from motopark_bot.responses import build_check_response, build_nearest_response
 from motopark_bot.static_data import StaticCarparkStore
-from motopark_bot.ura_data import UraCarparkStore
+from motopark_bot.ura_data import UraCarparkStore, log_raw_feature_sample
 
 log = logging.getLogger(__name__)
 
@@ -95,23 +95,27 @@ def build_dispatcher(
     return dp
 
 
-async def _prime_optional_store(name: str, refresh_coro) -> None:
+async def _prime_optional_store(name: str, refresh_coro) -> bool:
     """Prime a non-critical static store at startup without crashing the bot.
 
     static_store (HDB) failing to load is fatal - it's the bot's core data.
     ura_store and rates_store are speculative extensions built against
     documented-but-unverified dataset schemas (see README), so a parsing
     failure there logs loudly and leaves that store empty/retrying rather
-    than taking down /check and /nearest entirely.
+    than taking down /check and /nearest entirely. Returns whether priming
+    succeeded, so callers can follow up (e.g. ura_store's raw-data
+    diagnostic below) only when it didn't.
     """
     try:
         await refresh_coro
+        return True
     except Exception:
         log.exception(
             "Failed to prime %s at startup - continuing without it. "
             "This is a known-unverified data source, see README.",
             name,
         )
+        return False
 
 
 async def run_bot() -> None:
@@ -142,11 +146,16 @@ async def run_bot() -> None:
         log.info("Loaded %d HDB carparks.", len(await static_store.all()))
 
         log.info("Priming URA carpark capacity dataset...")
-        await _prime_optional_store("ura_store", ura_store.refresh(force=True))
+        ura_ok = await _prime_optional_store("ura_store", ura_store.refresh(force=True))
         # Read the cache directly rather than calling .all() again - that
         # would re-trigger refresh() and, on a failed prime above, throw an
         # unhandled exception here instead of just logging 0 and moving on.
         log.info("Loaded %d URA carparks.", len(ura_store._carparks))
+        if not ura_ok:
+            # Render's free tier has no Shell tab to run the interactive
+            # `python -m motopark_bot.ura_data` smoke test, so log the raw
+            # feature data here instead - visible from the (free) Logs tab.
+            await log_raw_feature_sample()
 
         log.info("Priming Carpark Rates dataset...")
         await _prime_optional_store("rates_store", rates_store.refresh(force=True))

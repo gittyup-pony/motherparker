@@ -102,18 +102,26 @@ in `lta_client.py` before relying on it.
    `WebFetch` hit `403 PROXY_REJECTED` on the presigned S3 download URLs
    data.gov.sg's API returned. `ura_data.py` is built strictly against the
    *documented* field names (`PP_CODE`, `PARKING_PL`, `NO_MCYCLE`, etc.)
-   and assumes WGS84 `[lon, lat]` coordinates per the GeoJSON spec — none
-   of that has been checked against a real response. Run this once you're
-   deployed (no API key needed, it's a public dataset):
+   and assumes WGS84 `[lon, lat]` coordinates per the GeoJSON spec — and
+   this has now failed for real in production (`Fetched 0 usable URA
+   carparks`).
+
+   If you have Shell access (Render's paid plans, Railway, your own box),
+   run this — it prints how many carparks loaded and a couple of sample
+   records:
 
    ```bash
    python -m motopark_bot.ura_data
    ```
 
-   It prints how many carparks loaded, and a couple of sample records —
-   if the names/capacities look wrong or empty, the field-name or
-   HTML-table-fallback assumptions in `ura_data.py`/`datagovsg.py` need
-   adjusting.
+   **On Render's free tier there's no Shell tab**, so instead, whenever
+   priming `ura_store` fails at startup, `bot.py` automatically calls
+   `ura_data.log_raw_feature_sample()`, which logs the raw (unparsed)
+   GeoJSON — feature count, geometry type, and the actual property keys —
+   at `WARNING` level. Check Render's **Logs** tab (free) after a
+   deploy/restart for lines starting `URA diagnostic [...]`. Whichever way
+   you get it, that output is exactly what's needed to fix the field-name
+   guesses in `ura_data.py`/`datagovsg.py` against the real dataset shape.
 4. **Whether URA's `PP_CODE` ever matches an LTA `CarParkID`.** Unverified
    like #2, but for the URA/LTA-agency pairing instead of HDB — if it
    never matches, `/check` and `/nearest` results for URA carparks will
@@ -239,7 +247,7 @@ motopark_bot/
   health.py             decoy HTTP endpoint, active only when $PORT is set (Render)
   bot.py                aiogram handlers (thin wiring onto responses.py)
   main.py               entrypoint
-tests/            pytest suite (76 tests, run against fixture data — real
+tests/            pytest suite (80 tests, run against fixture data — real
                   fixtures for HDB/LTA pulled from data.gov.sg, synthetic
                   fixtures for URA/Carpark Rates since real samples
                   couldn't be fetched (see verification section above) —

@@ -104,12 +104,25 @@ def parse_csv_text(text: str) -> list[dict[str, str]]:
 
 async def fetch_geojson_features(dataset_id: str) -> list[GeoFeature]:
     """Download + parse a data.gov.sg GeoJSON dataset into flat features."""
+    geojson = await fetch_raw_geojson(dataset_id)
+    return parse_geojson(geojson)
+
+
+async def fetch_raw_geojson(dataset_id: str) -> dict:
+    """Download the decoded GeoJSON as-is, with none of parse_geojson()'s
+    Point-only filtering or clean/HTML-table property resolution applied.
+
+    Exists for diagnosing a dataset that parses to zero usable records
+    (see ura_data.py's log_raw_feature_sample) — if the geometry type
+    isn't "Point", or the top-level shape isn't what's expected,
+    fetch_geojson_features() silently returns [] and gives no clue why.
+    This gives the ground truth instead.
+    """
     async with httpx.AsyncClient() as client:
         url = await fetch_download_url(client, dataset_id)
         resp = await client.get(url, timeout=60.0)
         resp.raise_for_status()
-        geojson = resp.json()
-    return parse_geojson(geojson)
+        return resp.json()
 
 
 async def fetch_csv_rows(dataset_id: str) -> list[dict[str, str]]:
