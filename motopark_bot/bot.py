@@ -7,6 +7,7 @@ Telegram-facing wiring.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -155,6 +156,11 @@ async def run_bot() -> None:
             # Render's free tier has no Shell tab to run the interactive
             # `python -m motopark_bot.ura_data` smoke test, so log the raw
             # feature data here instead - visible from the (free) Logs tab.
+            # A short cooldown first: the failed refresh above already made
+            # 2 poll-download calls, and firing 2 more immediately risks
+            # tripping data.gov.sg's rate limit (429) - confirmed in
+            # production - which would make the diagnostic fail too.
+            await asyncio.sleep(3)
             await log_raw_feature_sample()
 
         log.info("Priming Carpark Rates dataset...")

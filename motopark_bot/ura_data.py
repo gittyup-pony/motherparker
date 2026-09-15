@@ -23,6 +23,7 @@ own function for these since the *display* fields genuinely differ
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -33,6 +34,12 @@ log = logging.getLogger(__name__)
 
 PARKING_LOT_DATASET_ID = "d_d959102fa76d58f2de276bfbb7e8f68e"
 CAPACITY_DATASET_ID = "d_9bf8620ecfdc8a5f8f77e3f02160af5c"
+
+# See fetch_all_ura_carparks()/log_raw_feature_sample() below - data.gov.sg's
+# poll-download endpoint rate-limits (429) rapid successive calls, confirmed
+# in production. This is a courtesy delay between calls to the same
+# endpoint, not a substitute for fetch_download_url's retry-with-backoff.
+_INTER_REQUEST_DELAY_SECONDS = 1.5
 
 # Field names as documented on data.gov.sg's dataset pages. Both datasets
 # are classic ArcGIS/SHP exports (short truncated attribute names), so
@@ -131,6 +138,11 @@ def _build_carparks(
 
 async def fetch_all_ura_carparks() -> list[UraCarpark]:
     locations = await fetch_geojson_features(PARKING_LOT_DATASET_ID)
+    # A short stagger before the second poll-download call, purely to
+    # reduce the odds of tripping data.gov.sg's rate limit in the first
+    # place (fetch_download_url's retry-with-backoff handles it either
+    # way, but avoiding the 429 is faster than recovering from it).
+    await asyncio.sleep(_INTER_REQUEST_DELAY_SECONDS)
     capacity_features = await fetch_geojson_features(CAPACITY_DATASET_ID)
     capacity_by_code = _build_capacity_index(capacity_features)
     return _build_carparks(locations, capacity_by_code)
@@ -188,8 +200,17 @@ async def log_raw_feature_sample() -> None:
     properties are visible from Render's dashboard after a
     restart/redeploy, without needing paid Shell access. Called from
     bot.py when priming ura_store fails at startup.
+
+    Called right after the main refresh already made 2 poll-download
+    calls, so this staggers its own 2 calls too (see
+    _INTER_REQUEST_DELAY_SECONDS) - confirmed in production that firing
+    requests back-to-back trips data.gov.sg's rate limit (429), which
+    would otherwise make the diagnostic itself fail before showing us
+    anything useful.
     """
-    for label, dataset_id in (("Parking Lot", PARKING_LOT_DATASET_ID), ("Capacity", CAPACITY_DATASET_ID)):
+    for i, (label, dataset_id) in enumerate((("Parking Lot", PARKING_LOT_DATASET_ID), ("Capacity", CAPACITY_DATASET_ID))):
+        if i > 0:
+            await asyncio.sleep(_INTER_REQUEST_DELAY_SECONDS)
         try:
             raw = await fetch_raw_geojson(dataset_id)
             features = raw.get("features", [])

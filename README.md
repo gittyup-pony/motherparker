@@ -28,7 +28,10 @@ the combination none of the existing apps seem to do.
   opposed to the older `datastore_search` API `static_data.py` uses). It
   handles two GeoJSON shapes defensively: clean top-level `properties`,
   or the legacy ArcGIS-export shape where the real fields are packed into
-  an HTML `<table>` inside a `Description` property.
+  an HTML `<table>` inside a `Description` property. It also retries with
+  backoff on a `429 Too Many Requests` from the poll-download endpoint
+  (confirmed in production — see the URA diagnostic note below), honoring
+  a `Retry-After` header when the server sends one.
 - `ura_data.py` fetches and caches URA's Parking Lot (location) and
   Capacity (motorcycle/car/heavy-vehicle bay counts) datasets, joins them
   on `PP_CODE`, and extends both `/check` and `/nearest` with carparks
@@ -122,6 +125,16 @@ in `lta_client.py` before relying on it.
    deploy/restart for lines starting `URA diagnostic [...]`. Whichever way
    you get it, that output is exactly what's needed to fix the field-name
    guesses in `ura_data.py`/`datagovsg.py` against the real dataset shape.
+
+   **Heads up — data.gov.sg's poll-download endpoint rate-limits (429)
+   rapid successive calls,** confirmed in production: a startup that
+   already fired 2 calls (for `ura_store`'s two datasets), followed
+   immediately by 2 more from this diagnostic, got a `429 Too Many
+   Requests` on the diagnostic's own first call — so the very thing meant
+   to explain the failure failed too. Fixed with a retry-with-backoff in
+   `datagovsg.fetch_download_url()` plus a short stagger between calls
+   (`ura_data._INTER_REQUEST_DELAY_SECONDS`), but if you ever see `429` in
+   the logs again, that's what it means — not a new bug.
 4. **Whether URA's `PP_CODE` ever matches an LTA `CarParkID`.** Unverified
    like #2, but for the URA/LTA-agency pairing instead of HDB — if it
    never matches, `/check` and `/nearest` results for URA carparks will
@@ -247,7 +260,7 @@ motopark_bot/
   health.py             decoy HTTP endpoint, active only when $PORT is set (Render)
   bot.py                aiogram handlers (thin wiring onto responses.py)
   main.py               entrypoint
-tests/            pytest suite (80 tests, run against fixture data — real
+tests/            pytest suite (85 tests, run against fixture data — real
                   fixtures for HDB/LTA pulled from data.gov.sg, synthetic
                   fixtures for URA/Carpark Rates since real samples
                   couldn't be fetched (see verification section above) —

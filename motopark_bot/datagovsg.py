@@ -9,6 +9,7 @@ tabular or geospatial.
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import re
@@ -17,6 +18,14 @@ from dataclasses import dataclass
 import httpx
 
 POLL_DOWNLOAD_URL = "https://api-open.data.gov.sg/v1/public/api/datasets/{dataset_id}/poll-download"
+
+# Confirmed in production: this endpoint rate-limits (429) rapid successive
+# calls. A single startup can easily make 4+ calls to it back-to-back (two
+# datasets for ura_store, one for rates_store, plus - on a failed URA prime
+# - two more from the raw-feature diagnostic), which is enough to trip it.
+# fetch_download_url() below retries with backoff instead of failing
+# immediately on a 429.
+_MAX_POLL_DOWNLOAD_RETRIES = 4
 
 # Some of data.gov.sg's older geospatial layers (this one included, going by
 # its field names — OBJECTID_1, NO_H_VEHIC, FMEL_UPD_D: classic 10-char-max
@@ -47,13 +56,35 @@ def _parse_description_html_table(html: str) -> dict[str, str]:
     return result
 
 
+def _retry_after_seconds(resp: httpx.Response, attempt: int) -> float:
+    """How long to back off before retrying a 429, in seconds.
+
+    Honors a numeric Retry-After header if the server sends one; otherwise
+    a simple linear backoff (2s, 4s, 6s, ...).
+    """
+    header = resp.headers.get("Retry-After")
+    if header:
+        try:
+            return max(float(header), 0.5)
+        except ValueError:
+            pass
+    return 2.0 * (attempt + 1)
+
+
 async def fetch_download_url(client: httpx.AsyncClient, dataset_id: str) -> str:
-    resp = await client.get(POLL_DOWNLOAD_URL.format(dataset_id=dataset_id), timeout=30.0)
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("code") != 0 or not payload.get("data", {}).get("url"):
-        raise RuntimeError(f"poll-download for {dataset_id} did not return a usable URL: {payload}")
-    return payload["data"]["url"]
+    for attempt in range(_MAX_POLL_DOWNLOAD_RETRIES):
+        resp = await client.get(POLL_DOWNLOAD_URL.format(dataset_id=dataset_id), timeout=30.0)
+        if resp.status_code == 429:
+            if attempt == _MAX_POLL_DOWNLOAD_RETRIES - 1:
+                resp.raise_for_status()  # out of retries - surface the real 429
+            await asyncio.sleep(_retry_after_seconds(resp, attempt))
+            continue
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != 0 or not payload.get("data", {}).get("url"):
+            raise RuntimeError(f"poll-download for {dataset_id} did not return a usable URL: {payload}")
+        return payload["data"]["url"]
+    raise AssertionError("unreachable")  # the loop above always returns or raises
 
 
 @dataclass(frozen=True)
