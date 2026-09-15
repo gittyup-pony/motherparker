@@ -1,0 +1,40 @@
+{
+  "value": [
+    {
+      "CarParkID": "ACB",
+      "Area": "Marina",
+      "Development": "BLK 270/271 ALBERT CENTRE BASEMENT CAR PARK",
+      "Location": "1.301059 103.855409",
+      "AvailableLots": "45",
+      "LotType": "C",
+      "Agency": "HDB"
+    },
+    {
+      "CarParkID": "ACB",
+      "Area": "Marina",
+      "Development": "BLK 270/271 ALBERT CENTRE BASEMENT CAR PARK",
+      "Location": "1.301059 103.855409",
+      "AvailableLots": "3",
+      "LotType": "Y",
+      "Agency": "HDB"
+    },
+    {
+      "CarParkID": "AK19",
+      "Area": "Toa Payoh",
+      "Development": "BLOCK 253 ANG MO KIO STREET 21",
+      "Location": "1.375600 103.845200",
+      "AvailableLots": "0",
+      "LotType": "Y",
+      "Agency": "HDB"
+    },
+    {
+      "CarParkID": "AK31",
+      "Area": "Toa Payoh",
+      "Development": "BLK 302/348 ANG MO KIO STREET 31",
+      "Location": "1.372900 103.847300",
+      "AvailableLots": "12",
+      "LotType": "H",
+      "Agency": "HDB"
+    }
+  ]
+}
