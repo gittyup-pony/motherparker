@@ -18,3 +18,12 @@ services:
         sync: false
       - key: LTA_ACCOUNT_KEY
         sync: false
+      # Optional: enables /check with a 6-digit postal code (e.g.
+      # `/check 238801`). Leave blank in the Render dashboard and the bot
+      # still works fine - postal-code queries just get a "not set up"
+      # reply instead of results. Register a free account at
+      # https://www.onemap.gov.sg to get these - see README.md.
+      - key: ONEMAP_EMAIL
+        sync: false
+      - key: ONEMAP_PASSWORD
+        sync: false

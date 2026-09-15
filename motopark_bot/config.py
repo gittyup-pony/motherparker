@@ -30,6 +30,13 @@ class Settings:
         self.bot_token: str = _require("TELEGRAM_BOT_TOKEN")
         self.lta_account_key: str = _require("LTA_ACCOUNT_KEY")
 
+        # Optional - enables /check with a 6-digit postal code (geocoded via
+        # OneMap, then searched the same way as /nearest). If either is
+        # unset, postal-code queries get a "not set up" message instead of
+        # failing; everything else in the bot works the same either way.
+        self.onemap_email: str | None = os.environ.get("ONEMAP_EMAIL") or None
+        self.onemap_password: str | None = os.environ.get("ONEMAP_PASSWORD") or None
+
         # How many nearest carparks to return for /nearest.
         self.nearest_result_count: int = int(os.environ.get("NEAREST_RESULT_COUNT", "5"))
 

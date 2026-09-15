@@ -54,13 +54,22 @@ RATE_ENTRY = RateEntry(
 
 
 def test_format_carpark_with_live_data():
+    # Streamlined output: address, paid/free, distance, availability state.
+    # No shelter, no night-parking, no raw lot count - all deliberately
+    # dropped, see formatting.py's module docstring.
     text = format_carpark(INFO, LIVE, distance_km=0.42)
     assert "ALBERT CENTRE" in text
-    assert "sheltered" in text
-    assert "paid" in text
+    assert "Paid" in text
     assert "0.42 km" in text
-    assert "3" in text
-    assert "night parking" in text
+    assert "Available" in text
+    assert "sheltered" not in text.lower()
+    assert "night parking" not in text.lower()
+    assert "3" not in text  # raw lot count must never appear
+
+
+def test_format_carpark_without_distance():
+    text = format_carpark(INFO, LIVE)
+    assert "km" not in text  # distance line omitted entirely when unknown
 
 
 def test_format_carpark_without_live_data():
@@ -71,50 +80,55 @@ def test_format_carpark_without_live_data():
 def test_format_carpark_full_lots():
     full = LiveLot(**{**LIVE.__dict__, "available_lots": 0})
     text = format_carpark(INFO, full)
-    assert "FULL" in text
+    assert "Full" in text
+    assert "Available" not in text
 
 
 def test_format_ura_carpark_with_live_match():
     text = format_ura_carpark(URA_INFO, LIVE, distance_km=1.5)
     assert "ORCHARD ROAD CARPARK" in text
-    assert "SP0001" in text
     assert "1.50 km" in text
-    assert "*3*" in text  # live count wins over capacity when both exist
+    assert "Available" in text
+    # URA has no pricing field at all - no paid/free line for it.
+    assert "💰" not in text
+    assert "SP0001" not in text  # carpark code no longer shown
 
 
-def test_format_ura_carpark_falls_back_to_capacity_when_no_live_match():
+def test_format_ura_carpark_no_live_data():
     text = format_ura_carpark(URA_INFO, None)
-    assert "40 motorcycle bays" in text
-    assert "capacity" in text
-    assert "live count unavailable" in text
-
-
-def test_format_ura_carpark_unknown_capacity_and_no_live():
-    unknown = UraCarpark(
-        pp_code="SP0099",
-        name="UNKNOWN CARPARK",
-        lat=1.3,
-        lon=103.8,
-        motorcycle_capacity=None,
-        car_capacity=None,
-        heavy_vehicle_capacity=None,
-    )
-    text = format_ura_carpark(unknown, None)
-    assert "unknown" in text.lower()
+    assert "ORCHARD ROAD CARPARK" in text
+    assert "no live data" in text
+    # Capacity numbers are dropped along with everything else numeric.
+    assert "40" not in text
+    assert "capacity" not in text.lower()
 
 
 def test_format_rate_entry_with_live_match():
     text = format_rate_entry(RATE_ENTRY, LIVE)
     assert "Suntec City" in text
-    assert "Marina" in text
     assert "$1.00 per 30 min" in text
-    assert "*3*" in text
+    assert "Available" in text
+    assert "Marina" not in text  # category isn't one of the four fields
 
 
 def test_format_rate_entry_without_live_match():
     text = format_rate_entry(RATE_ENTRY, None)
     assert "no live data" in text
-    assert "rate listing only" in text
+    assert "Paid" in text
+
+
+def test_format_rate_entry_without_rate_string():
+    no_rate = RateEntry(
+        name="Some Hotel",
+        category="Hotel",
+        weekday_rate_1="",
+        weekday_rate_2="",
+        saturday_rate="",
+        sunday_ph_rate="",
+    )
+    text = format_rate_entry(no_rate, None)
+    assert "💰 Paid" in text
+    assert "from" not in text
 
 
 def test_join_blocks_empty_uses_message():

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from motopark_bot.matching import _tokenize, score_text_match
+from motopark_bot.matching import score_text_match
 
 BASE_URL = "https://datamall2.mytransport.sg/ltaodataservice/CarParkAvailabilityv2"
 PAGE_SIZE = 500
@@ -152,11 +152,10 @@ class LiveAvailabilityStore:
         if not q:
             return []
         q_upper = q.upper()
-        q_tokens = _tokenize(q)
 
         scored: list[tuple[float, LiveLot]] = []
         for lot in self._by_carpark_id.values():
-            score = score_text_match(q_upper, q_tokens, lot.development)
+            score = score_text_match(q_upper, lot.development)
             if score > 0:
                 scored.append((score, lot))
         scored.sort(key=lambda t: -t[0])

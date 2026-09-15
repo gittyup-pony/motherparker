@@ -1,11 +1,20 @@
 """Shared Telegram message formatting for carpark results.
 
-Three source types can appear in one /check or /nearest reply now (HDB via
-static_data.CarparkInfo, URA via ura_data.UraCarpark, and — /check only —
-Carpark Rates via carpark_rates_data.RateEntry), each with different fields
-available, so each gets its own formatter. bot.py builds the combined list
-of blocks (deciding which formatter to call per result) and passes it to
-join_blocks() here.
+Streamlined to four things per result, per explicit request: address,
+paid/free, distance (when known), and availability — availability is
+always a state (available / full / no live data), never a raw lot count
+or bay-capacity number. Three source types can appear in one /check or
+/nearest reply (HDB via static_data.CarparkInfo, URA via
+ura_data.UraCarpark, and — /check only — Carpark Rates via
+carpark_rates_data.RateEntry); each gets its own formatter since the
+underlying fields differ, but they all share _availability_line() so the
+"no raw numbers" rule can't drift between them.
+
+Shelter info, carpark codes, and night-parking used to be shown here too
+— dropped along with the raw numbers to keep the reply to just the four
+requested fields. Navigation is unaffected by any of this: bot.py builds
+"🧭 Navigate" buttons separately, from responses.py's NavTarget list, not
+from anything in this module.
 """
 from __future__ import annotations
 
@@ -15,48 +24,43 @@ from motopark_bot.static_data import CarparkInfo
 from motopark_bot.ura_data import UraCarpark
 
 
-def _lots_line(live: LiveLot | None) -> str:
+def _availability_line(live: LiveLot | None) -> str:
+    """Available / full / unknown — deliberately never a specific lot
+    count or bay-capacity number, per explicit request."""
     if live is None:
-        return "🏍 motorcycle lots: _no live data_"
+        return "❓ Availability: no live data"
     if live.available_lots <= 0:
-        return "🏍 *FULL* (0 motorcycle lots)"
-    return f"🏍 *{live.available_lots}* motorcycle lots available"
+        return "🔴 Full"
+    return "✅ Available"
 
 
 def format_carpark(info: CarparkInfo, live: LiveLot | None, distance_km: float | None = None) -> str:
-    lines = [f"*{info.address}*", f"`{info.car_park_no}` · {info.shelter_label} · {info.price_label}"]
+    lines = [f"*{info.address}*", f"💰 {info.price_label.capitalize()}"]
     if distance_km is not None:
         lines.append(f"📍 {distance_km:.2f} km away")
-    lines.append(_lots_line(live))
-    if info.night_parking == "YES":
-        lines.append("🌙 night parking available")
+    lines.append(_availability_line(live))
     return "\n".join(lines)
 
 
 def format_ura_carpark(info: UraCarpark, live: LiveLot | None, distance_km: float | None = None) -> str:
-    lines = [f"*{info.name}*", f"`{info.pp_code}` · URA carpark"]
+    # No pricing field exists in this dataset at all (see ura_data.py) -
+    # nothing honest to show for "paid or free" here, unlike HDB/Carpark
+    # Rates, so that line is simply omitted rather than guessed at.
+    lines = [f"*{info.name}*"]
     if distance_km is not None:
         lines.append(f"📍 {distance_km:.2f} km away")
-    if live is not None:
-        lines.append(_lots_line(live))
-    elif info.motorcycle_capacity is not None:
-        # No live match (see README's URA join caveat) - fall back to total
-        # bay count, clearly labeled as capacity, not current availability.
-        lines.append(f"🏍 {info.motorcycle_capacity} motorcycle bays (capacity) — live count unavailable")
-    else:
-        lines.append("🏍 motorcycle capacity: _unknown_")
+    lines.append(_availability_line(live))
     return "\n".join(lines)
 
 
 def format_rate_entry(entry: RateEntry, live: LiveLot | None) -> str:
+    # Every Carpark Rates entry is inherently paid (it's a listing of
+    # parking rates) - shown with the rate itself as the "paid" evidence,
+    # not a separate lot count.
     lines = [f"*{entry.name}*"]
-    subtitle_bits = [b for b in (entry.category, f"from {entry.weekday_rate_1}" if entry.weekday_rate_1 else None) if b]
-    if subtitle_bits:
-        lines.append(" · ".join(subtitle_bits))
-    if live is not None:
-        lines.append(_lots_line(live))
-    else:
-        lines.append("🏍 motorcycle lots: _no live data (rate listing only)_")
+    price_bit = f"💰 Paid — from {entry.weekday_rate_1}" if entry.weekday_rate_1 else "💰 Paid"
+    lines.append(price_bit)
+    lines.append(_availability_line(live))
     return "\n".join(lines)
 
 
@@ -66,10 +70,21 @@ def join_blocks(blocks: list[str], empty_message: str) -> str:
 
 NO_NEARBY_MESSAGE = (
     "No carparks found nearby. Try sending a location closer to town, "
-    "or use /check <carpark name> to search by name instead."
+    "or use /check <carpark name or postal code> to search instead."
 )
 
 NO_MATCH_MESSAGE = (
     "No carparks matched that. Try a shorter search term (e.g. just the "
-    "mall or street name), or share your location instead with /nearest."
+    "mall or street name), a 6-digit postal code, or share your location "
+    "instead with /nearest."
+)
+
+POSTAL_CODE_NOT_CONFIGURED_MESSAGE = (
+    "Postal code search isn't set up on this bot yet. Try searching by "
+    "carpark or mall name instead, e.g. `/check jurong point`."
+)
+
+POSTAL_CODE_NOT_FOUND_MESSAGE = (
+    "Couldn't find that postal code. Double-check the 6 digits, or try "
+    "searching by carpark or mall name instead."
 )

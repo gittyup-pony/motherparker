@@ -13,25 +13,35 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand, Message
+from aiogram.types import BotCommand, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from motopark_bot.carpark_rates_data import CarparkRatesStore
 from motopark_bot.config import get_settings
 from motopark_bot.health import start_health_server
 from motopark_bot.lta_client import LiveAvailabilityStore
-from motopark_bot.responses import build_check_response, build_nearest_response
+from motopark_bot.maps import maps_url
+from motopark_bot.onemap import OneMapClient
+from motopark_bot.responses import NavTarget, build_check_response, build_nearest_response
 from motopark_bot.static_data import StaticCarparkStore
 from motopark_bot.ura_data import UraCarparkStore, log_raw_feature_sample
+
+# Telegram caps inline button text at 64 UTF-16 code units - carpark
+# addresses/names routinely run longer than that, so labels get truncated
+# to this before the "🧭 " prefix and a trailing "…" are added.
+_NAV_LABEL_MAX_CHARS = 40
 
 log = logging.getLogger(__name__)
 
 START_TEXT = (
     "🏍 *MotoPark SG*\n\n"
-    "Find motorcycle parking with live lot counts, shelter type, and free/paid info.\n\n"
-    "*/check <name>* — look up a specific carpark, e.g. `/check jurong point`\n"
+    "Find motorcycle parking with live availability and free/paid info.\n\n"
+    "*/check <name or postal code>* — look up a carpark by name or a 6-digit "
+    "postal code, e.g. `/check jurong point` or `/check 238801`\n"
     "*/nearest* — then share your location, to see the closest carparks\n\n"
+    "Each result comes with a 🧭 *Navigate* button that opens directions in Google Maps.\n\n"
     "Data: LTA DataMall (live lots), data.gov.sg HDB Carpark Information "
-    "(shelter/pricing), URA carpark capacity, and Carpark Rates (malls/hotels)."
+    "(pricing), URA carpark capacity, and Carpark Rates (malls/hotels)."
 )
 
 # Registered with Telegram via bot.set_my_commands() at startup so they show
@@ -46,11 +56,33 @@ BOT_COMMANDS = [
 ]
 
 
+def build_nav_keyboard(nav_targets: list[NavTarget]) -> InlineKeyboardMarkup | None:
+    """One "🧭 Navigate" button per result that has coordinates.
+
+    Returns None (no reply_markup at all) when there's nothing to link to -
+    e.g. a /check reply that matched only Carpark Rates entries, which have
+    no coordinates (see responses.py). Each button opens Google Maps
+    directions to that carpark (see maps.py) - tapping it hands off to
+    whatever maps app is installed, or the Google Maps website otherwise.
+    """
+    if not nav_targets:
+        return None
+    builder = InlineKeyboardBuilder()
+    for target in nav_targets:
+        label = f"🧭 {target.label.strip()}"
+        if len(label) > _NAV_LABEL_MAX_CHARS:
+            label = label[: _NAV_LABEL_MAX_CHARS - 1] + "…"
+        builder.button(text=label, url=maps_url(target.lat, target.lon))
+    builder.adjust(1)  # one per row - labels are full names/addresses, too wide for 2-up
+    return builder.as_markup()
+
+
 def build_dispatcher(
     static_store: StaticCarparkStore,
     ura_store: UraCarparkStore,
     rates_store: CarparkRatesStore,
     live_store: LiveAvailabilityStore,
+    onemap_client: OneMapClient | None = None,
 ) -> Dispatcher:
     dp = Dispatcher()
 
@@ -62,12 +94,27 @@ def build_dispatcher(
     async def check_handler(message: Message, command: CommandObject) -> None:
         query = (command.args or "").strip()
         if not query:
-            await message.answer("Usage: `/check <carpark name>`, e.g. `/check jurong point`", parse_mode="Markdown")
+            await message.answer(
+                "Usage: `/check <carpark name or postal code>`, e.g. `/check jurong point` or `/check 238801`",
+                parse_mode="Markdown",
+            )
             return
 
+        settings = get_settings()
         await message.chat.do("typing")
-        text = await build_check_response(query, static_store, ura_store, rates_store, live_store)
-        await message.answer(text, parse_mode="Markdown")
+        reply = await build_check_response(
+            query,
+            static_store,
+            ura_store,
+            rates_store,
+            live_store,
+            onemap_client,
+            nearest_result_count=settings.nearest_result_count,
+            nearest_max_radius_km=settings.nearest_max_radius_km,
+        )
+        await message.answer(
+            reply.text, parse_mode="Markdown", reply_markup=build_nav_keyboard(reply.nav_targets)
+        )
 
     @dp.message(Command("nearest"))
     async def nearest_prompt_handler(message: Message) -> None:
@@ -82,7 +129,7 @@ def build_dispatcher(
         settings = get_settings()
 
         await message.chat.do("typing")
-        text = await build_nearest_response(
+        reply = await build_nearest_response(
             loc.latitude,
             loc.longitude,
             static_store,
@@ -91,7 +138,9 @@ def build_dispatcher(
             limit=settings.nearest_result_count,
             max_radius_km=settings.nearest_max_radius_km,
         )
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer(
+            reply.text, parse_mode="Markdown", reply_markup=build_nav_keyboard(reply.nav_targets)
+        )
 
     return dp
 
@@ -142,6 +191,16 @@ async def run_bot() -> None:
         rates_store = CarparkRatesStore(ttl_seconds=settings.static_data_ttl_seconds)
         live_store = LiveAvailabilityStore(settings.lta_account_key, ttl_seconds=settings.live_data_ttl_seconds)
 
+        onemap_client = (
+            OneMapClient(settings.onemap_email, settings.onemap_password)
+            if settings.onemap_email and settings.onemap_password
+            else None
+        )
+        log.info(
+            "Postal-code search via OneMap: %s",
+            "enabled" if onemap_client else "disabled (ONEMAP_EMAIL/ONEMAP_PASSWORD not set)",
+        )
+
         log.info("Priming static carpark dataset from data.gov.sg...")
         await static_store.refresh(force=True)
         log.info("Loaded %d HDB carparks.", len(await static_store.all()))
@@ -168,7 +227,7 @@ async def run_bot() -> None:
         log.info("Loaded %d rate entries.", len(rates_store._entries))
 
         bot = Bot(token=settings.bot_token)
-        dp = build_dispatcher(static_store, ura_store, rates_store, live_store)
+        dp = build_dispatcher(static_store, ura_store, rates_store, live_store, onemap_client)
 
         await bot.set_my_commands(BOT_COMMANDS)
         log.info("Registered %d preset commands with Telegram.", len(BOT_COMMANDS))
