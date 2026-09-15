@@ -52,11 +52,31 @@ the combination none of the existing apps seem to do.
   it just expects port 10000 by default, so that's what this defaults to.
   See "Deploy to Render" below for why it exists.
 
+**Resilience:** `responses.py`'s `_safe()` wraps every call to the URA,
+Carpark Rates, and live-data stores — if one of them is broken (bad
+dataset schema, LTA outage, whatever), that source is silently dropped
+from the reply (with a `WARNING`-level log line) instead of the entire
+`/check` or `/nearest` reply failing. The stores themselves also back off
+after a failed fetch (`retry_backoff_seconds`, default 5 min) so a
+persistently broken source doesn't re-hit the network on every message.
+HDB (`static_data.py`) is the one source that's *expected* to always work
+— if it's down at startup the bot refuses to start (see `run_bot()` in
+`bot.py`), but a transient failure mid-session is still caught the same
+way as the others rather than taking down every reply.
+
 ## ⚠️ Things to verify once you have a real API key
 
 I built this against documented schemas, but couldn't test live calls
 myself (no DataMall account, and this sandbox's network doesn't reach
 data.gov.sg/LTA anyway). These assumptions need a real check:
+
+> **Update from a real deploy:** item 3 below (URA field names) is now
+> confirmed wrong — production logs showed `Fetched 0 usable URA
+> carparks`. This no longer breaks the bot: `/check` and `/nearest` fall
+> back to HDB + Carpark Rates results and log a warning
+> (`URA carpark data unavailable for this request...`) instead of
+> crashing (see "Resilience" below for how). URA results just won't show
+> up until the field names are fixed — see item 3 for how to diagnose it.
 
 1. **Which `LotType` code means motorcycle.** LTA's official API guide says
    `Y`, but I've seen a third-party source use `M` — I coded for both
@@ -219,7 +239,7 @@ motopark_bot/
   health.py             decoy HTTP endpoint, active only when $PORT is set (Render)
   bot.py                aiogram handlers (thin wiring onto responses.py)
   main.py               entrypoint
-tests/            pytest suite (62 tests, run against fixture data — real
+tests/            pytest suite (76 tests, run against fixture data — real
                   fixtures for HDB/LTA pulled from data.gov.sg, synthetic
                   fixtures for URA/Carpark Rates since real samples
                   couldn't be fetched (see verification section above) —

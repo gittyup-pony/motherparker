@@ -89,19 +89,34 @@ async def fetch_all_rate_entries() -> list[RateEntry]:
 
 
 class CarparkRatesStore:
-    """In-memory cache of the Carpark Rates dataset, long TTL (barely changes)."""
+    """In-memory cache of the Carpark Rates dataset, long TTL (barely changes).
 
-    def __init__(self, ttl_seconds: int = 24 * 60 * 60) -> None:
+    Same backoff reasoning as UraCarparkStore in ura_data.py: an empty
+    `_entries` cache is permanently "stale", so without
+    `_last_attempt_at`/`retry_backoff_seconds` a broken dataset would
+    re-attempt (and re-raise on) the network fetch on every single /check
+    call instead of backing off after the first failure.
+    """
+
+    def __init__(self, ttl_seconds: int = 24 * 60 * 60, retry_backoff_seconds: int = 300) -> None:
         self._ttl = ttl_seconds
+        self._retry_backoff = retry_backoff_seconds
         self._entries: list[RateEntry] = []
         self._fetched_at: float = 0.0
+        self._last_attempt_at: float = 0.0
 
     def _is_stale(self) -> bool:
         return not self._entries or (time.monotonic() - self._fetched_at) > self._ttl
 
     async def refresh(self, force: bool = False) -> None:
-        if not force and not self._is_stale():
-            return
+        if not force:
+            if not self._is_stale():
+                return
+            if not self._entries and self._last_attempt_at and (
+                time.monotonic() - self._last_attempt_at
+            ) < self._retry_backoff:
+                raise RuntimeError("Carpark Rates data unavailable (recent fetch failed, backing off).")
+        self._last_attempt_at = time.monotonic()
         entries = await fetch_all_rate_entries()
         if not entries:
             raise RuntimeError("Fetched 0 usable rate entries — refusing to update cache.")

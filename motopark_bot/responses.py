@@ -7,6 +7,9 @@ Message/Update objects.
 """
 from __future__ import annotations
 
+import logging
+from typing import Awaitable, TypeVar
+
 from motopark_bot.carpark_rates_data import CarparkRatesStore
 from motopark_bot.formatting import (
     NO_MATCH_MESSAGE,
@@ -21,6 +24,33 @@ from motopark_bot.matching import rank_matches
 from motopark_bot.nearest import find_nearest
 from motopark_bot.static_data import CarparkInfo, StaticCarparkStore
 from motopark_bot.ura_data import UraCarparkStore
+
+log = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+async def _safe(source_name: str, coro: Awaitable[T], default: T) -> T:
+    """Await a store call, treating any failure as `default` instead of crashing the reply.
+
+    ura_store and rates_store are speculative extensions built against
+    unverified dataset schemas (see README) — if a data source is broken,
+    its store raises (see ura_data.py/carpark_rates_data.py). This bit
+    once for real: a broken URA dataset took down every /nearest reply
+    with an unhandled RuntimeError, even though HDB data (the bot's core)
+    was working fine. live_store lookups can fail the same way (LTA
+    outage, bad AccountKey, a wrong LotType guess). Wrapping every
+    external call here means one broken source degrades that part of the
+    reply instead of losing the whole thing. Each store's own
+    retry-backoff (see ura_data.py) keeps a persistent failure from
+    hammering the network on every single message.
+    """
+    try:
+        return await coro
+    except Exception as exc:
+        log.warning("%s unavailable for this request, continuing without it: %s", source_name, exc)
+        return default
+
 
 # How many results to pull from each source per /check, before combining.
 # Kept small per-source so a query that matches broadly (e.g. "orchard")
@@ -37,9 +67,9 @@ async def build_check_response(
     rates_store: CarparkRatesStore,
     live_store: LiveAvailabilityStore,
 ) -> str:
-    hdb_carparks = await static_store.all()
-    ura_carparks = await ura_store.all()
-    rate_entries = await rates_store.all()
+    hdb_carparks = await _safe("HDB carpark data", static_store.all(), [])
+    ura_carparks = await _safe("URA carpark data", ura_store.all(), [])
+    rate_entries = await _safe("Carpark Rates data", rates_store.all(), [])
 
     hdb_matches = rank_matches(query, hdb_carparks, limit=CHECK_LIMIT_HDB)
     ura_matches = rank_matches(query, ura_carparks, limit=CHECK_LIMIT_URA)
@@ -47,19 +77,21 @@ async def build_check_response(
 
     blocks: list[str] = []
     for cp in hdb_matches:
-        live = await live_store.get(cp.car_park_no)
+        live = await _safe("live lot data", live_store.get(cp.car_park_no), None)
         blocks.append(format_carpark(cp, live))
     for ucp in ura_matches:
         # ucp.car_park_no aliases pp_code - whether that ever matches an
         # LTA CarParkID is unverified, see README. get() just returns None
         # if it doesn't, and format_ura_carpark falls back to showing
         # capacity instead of a live count in that case.
-        live = await live_store.get(ucp.car_park_no)
+        live = await _safe("live lot data", live_store.get(ucp.car_park_no), None)
         blocks.append(format_ura_carpark(ucp, live))
     for entry in rate_matches:
         # No ID to join on at all here - best-effort fuzzy name match
         # against the live feed's Development names instead.
-        live_candidates = await live_store.find_by_development_name(entry.name, limit=1)
+        live_candidates = await _safe(
+            "live lot data", live_store.find_by_development_name(entry.name, limit=1), []
+        )
         live = live_candidates[0] if live_candidates else None
         blocks.append(format_rate_entry(entry, live))
 
@@ -76,8 +108,8 @@ async def build_nearest_response(
     limit: int,
     max_radius_km: float,
 ) -> str:
-    hdb_carparks = await static_store.all()
-    ura_carparks = await ura_store.all()
+    hdb_carparks = await _safe("HDB carpark data", static_store.all(), [])
+    ura_carparks = await _safe("URA carpark data", ura_store.all(), [])
     # Carpark Rates entries have no coordinates, so they can't appear here -
     # /check is the only place they show up.
     combined = [*hdb_carparks, *ura_carparks]
@@ -86,7 +118,7 @@ async def build_nearest_response(
 
     live_by_id = {}
     for r in ranked:
-        live = await live_store.get(r.info.car_park_no)
+        live = await _safe("live lot data", live_store.get(r.info.car_park_no), None)
         if live is not None:
             live_by_id[r.info.car_park_no] = live
 

@@ -134,19 +134,36 @@ async def fetch_all_ura_carparks() -> list[UraCarpark]:
 
 
 class UraCarparkStore:
-    """In-memory cache of joined URA carpark data, long TTL (rarely changes)."""
+    """In-memory cache of joined URA carpark data, long TTL (rarely changes).
 
-    def __init__(self, ttl_seconds: int = 24 * 60 * 60) -> None:
+    If the dataset can't be parsed at all (see the field-name caveat at the
+    top of this file), `_carparks` stays permanently empty, which makes
+    `_is_stale()` permanently True — without `_last_attempt_at`/
+    `retry_backoff_seconds` below, that means every single /check or
+    /nearest call would re-attempt the network fetch and re-raise, instead
+    of failing once and quietly staying "unavailable" for a while. This bit
+    the bot for real once (see git history) before this backoff was added.
+    """
+
+    def __init__(self, ttl_seconds: int = 24 * 60 * 60, retry_backoff_seconds: int = 300) -> None:
         self._ttl = ttl_seconds
+        self._retry_backoff = retry_backoff_seconds
         self._carparks: list[UraCarpark] = []
         self._fetched_at: float = 0.0
+        self._last_attempt_at: float = 0.0
 
     def _is_stale(self) -> bool:
         return not self._carparks or (time.monotonic() - self._fetched_at) > self._ttl
 
     async def refresh(self, force: bool = False) -> None:
-        if not force and not self._is_stale():
-            return
+        if not force:
+            if not self._is_stale():
+                return
+            if not self._carparks and self._last_attempt_at and (
+                time.monotonic() - self._last_attempt_at
+            ) < self._retry_backoff:
+                raise RuntimeError("URA carpark data unavailable (recent fetch failed, backing off).")
+        self._last_attempt_at = time.monotonic()
         carparks = await fetch_all_ura_carparks()
         if not carparks:
             raise RuntimeError("Fetched 0 usable URA carparks — refusing to update cache.")

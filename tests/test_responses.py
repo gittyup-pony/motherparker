@@ -167,3 +167,84 @@ async def test_nearest_respects_max_radius(monkeypatch):
         1.0, 103.0, static_store, ura_store, live_store, limit=5, max_radius_km=1.0
     )
     assert "No carparks found" in text
+
+
+# --- Resilience: a broken optional source must not take down the whole
+# reply. This is a direct regression test for a real production incident:
+# the URA dataset failed to parse (see ura_data.py's backoff comment), and
+# without the _safe() wrapping in responses.py, that RuntimeError
+# propagated unhandled through build_nearest_response -> bot.py's location
+# handler, so /nearest (and /check) stopped replying at all - even though
+# HDB data (the bot's actual core) was working the whole time.
+
+
+class _BrokenStore:
+    """Stands in for ura_store/rates_store when their data source is down."""
+
+    async def all(self):
+        raise RuntimeError("simulated data source failure")
+
+
+class _BrokenLiveStore:
+    """Stands in for live_store when the LTA feed is down/misconfigured."""
+
+    async def get(self, car_park_id: str):
+        raise RuntimeError("simulated LTA failure")
+
+    async def find_by_development_name(self, query: str, limit: int = 3):
+        raise RuntimeError("simulated LTA failure")
+
+
+@pytest.mark.asyncio
+async def test_check_survives_broken_ura_store(monkeypatch):
+    static_store = _fresh_static_store()
+    rates_store = _fresh_rates_store()
+    live_store = _empty_live_store(monkeypatch)
+
+    text = await build_check_response("albert centre", static_store, _BrokenStore(), rates_store, live_store)
+    assert "ALBERT CENTRE" in text
+
+
+@pytest.mark.asyncio
+async def test_check_survives_broken_rates_store(monkeypatch):
+    static_store = _fresh_static_store()
+    ura_store = _fresh_ura_store()
+    live_store = _empty_live_store(monkeypatch)
+
+    text = await build_check_response("orchard road carpark", static_store, ura_store, _BrokenStore(), live_store)
+    assert "ORCHARD ROAD CARPARK" in text
+
+
+@pytest.mark.asyncio
+async def test_check_survives_broken_live_store():
+    static_store = _fresh_static_store()
+    ura_store = _fresh_ura_store()
+    rates_store = _fresh_rates_store()
+
+    text = await build_check_response("albert centre", static_store, ura_store, rates_store, _BrokenLiveStore())
+    assert "ALBERT CENTRE" in text
+    assert "no live data" in text
+
+
+@pytest.mark.asyncio
+async def test_nearest_survives_broken_ura_store(monkeypatch):
+    static_store = _fresh_static_store()
+    live_store = _empty_live_store(monkeypatch)
+
+    # Right on top of ALBERT CENTRE's fixture coordinates.
+    text = await build_nearest_response(
+        1.301059, 103.855409, static_store, _BrokenStore(), live_store, limit=5, max_radius_km=50.0
+    )
+    assert "ALBERT CENTRE" in text
+
+
+@pytest.mark.asyncio
+async def test_nearest_survives_broken_live_store():
+    static_store = _fresh_static_store()
+    ura_store = _fresh_ura_store()
+
+    text = await build_nearest_response(
+        1.301059, 103.855409, static_store, ura_store, _BrokenLiveStore(), limit=5, max_radius_km=50.0
+    )
+    assert "ALBERT CENTRE" in text
+    assert "no live data" in text
