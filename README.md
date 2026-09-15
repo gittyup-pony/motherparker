@@ -19,6 +19,11 @@ the existing apps seem to do.
   counts, filtered to motorcycle lots, cached with a 45s TTL.
 - The two are joined on carpark ID (HDB's `car_park_no` == LTA's
   `CarParkID` for HDB-agency records) to answer both commands.
+- `health.py` runs a tiny HTTP endpoint, but *only* when `RENDER=true` (or
+  `$PORT`) is set — true on Render, false everywhere else this README
+  covers. Render doesn't auto-inject `$PORT` for a custom start command,
+  it just expects port 10000 by default, so that's what this defaults to.
+  See "Deploy to Render" below for why it exists.
 
 ## ⚠️ Two things to verify once you have a real API key
 
@@ -62,29 +67,79 @@ in `lta_client.py` before relying on it.
 2. `/newbot`, follow the prompts, and copy the token it gives you — that's
    your `TELEGRAM_BOT_TOKEN`.
 
-### 3. Local setup
+### 3. (Optional) run the test suite locally
+
+The tests use fixture data, not live network calls, so they run without
+either API key — useful as a sanity check before you deploy, without
+actually running the bot itself anywhere:
 
 ```bash
-cp .env.example .env
-# edit .env and fill in TELEGRAM_BOT_TOKEN and LTA_ACCOUNT_KEY
-
 pip install -r requirements-dev.txt
-pytest                          # run the test suite (no API keys needed)
-python -m motopark_bot.main     # run the bot locally (needs both keys)
+pytest
 ```
 
-### 4. Deploy to Railway
+### 4. Push to GitHub
 
-1. Push this repo to GitHub.
-2. In Railway: New Project → Deploy from GitHub repo → pick this repo.
-3. Railway will detect `requirements.txt` and the `Procfile` (a `worker`
-   process — this bot long-polls Telegram, it isn't a web server, so don't
-   let Railway assign it a public URL/port).
-4. In the service's Variables tab, add `TELEGRAM_BOT_TOKEN` and
-   `LTA_ACCOUNT_KEY` (and any of the optional tuning vars from
-   `.env.example` if you want non-default values).
-5. Deploy. Check the logs for `Starting polling...` — then message your
-   bot on Telegram.
+Render (like Railway) deploys from a GitHub repo, not an upload:
+
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+git remote add origin https://github.com/<your-username>/motopark-bot.git
+git branch -M main
+git push -u origin main
+```
+
+### 5. Deploy to Render (free)
+
+Render's free tier only offers *Web Services* (not background workers),
+and free web services spin down after 15 minutes without an HTTP request.
+This bot doesn't naturally receive HTTP traffic — it long-polls Telegram —
+so `health.py` adds a decoy HTTP endpoint Render can health-check, and
+you'll pair it with an external pinger (step 6) to keep it awake. This is
+a workaround for the free tier, not how you'd run it on a platform with a
+real background-worker plan.
+
+1. In Render: **New +** → **Blueprint**, connect your GitHub repo. Render
+   reads `render.yaml` and pre-fills everything (free plan, Singapore
+   region, build/start commands) — you just need to paste in the two env
+   var values (`TELEGRAM_BOT_TOKEN`, `LTA_ACCOUNT_KEY`) when prompted.
+   - No `render.yaml` support, or prefer doing it by hand? **New +** →
+     **Web Service** instead, pick the repo, set Build Command to
+     `pip install -r requirements.txt` and Start Command to
+     `python -m motopark_bot.main`, plan **Free**, then add the two env
+     vars under the Environment tab.
+2. Deploy. Check the logs for `Health check server listening on
+   0.0.0.0:10000` (confirms the decoy endpoint is up) followed by
+   `Starting polling...` (confirms the actual bot is running).
+3. Render gives the service a public URL (something like
+   `https://motopark-bot-xxxx.onrender.com`) — you won't use this for
+   anything in Telegram, it only matters for step 6.
+
+### 6. Keep it awake with a free external pinger
+
+Without this, Render puts the service to sleep after 15 minutes of no HTTP
+traffic, and since nothing calls it over HTTP under normal use, it would
+just stay asleep.
+
+1. Sign up free at [UptimeRobot](https://uptimerobot.com) (or
+   [cron-job.org](https://cron-job.org), same idea).
+2. Add a new monitor: type **HTTP(s)**, URL = your Render service's URL
+   plus `/health` (e.g. `https://motopark-bot-xxxx.onrender.com/health`),
+   interval = **5 minutes** (comfortably under Render's 15-minute
+   spin-down window).
+3. Save. UptimeRobot will now hit that URL every 5 minutes forever, which
+   is indistinguishable from real traffic as far as Render's spin-down
+   logic is concerned.
+
+Worth knowing: this is a genuinely free way to keep it running, but it's a
+workaround, not a guarantee — if UptimeRobot has an outage, or Render
+changes free-tier behavior, the bot could go quiet until the next ping
+wakes it. For a personal utility bot that's a reasonable trade for $0/mo;
+if it ever needs to be reliable for other people, that's the point to
+move to a paid background-worker plan (Render Pro, Railway Hobby, or a
+self-managed box like Oracle Cloud's Always Free tier).
 
 ## Project layout
 
@@ -97,10 +152,13 @@ motopark_bot/
   matching.py     text search ranking for /check
   nearest.py      distance-based ranking for /nearest
   formatting.py   Telegram message formatting shared by both commands
+  health.py       decoy HTTP endpoint, active only when $PORT is set (Render)
   bot.py          aiogram handlers
   main.py         entrypoint
-tests/            pytest suite (31 tests, run against real fixture data
+tests/            pytest suite (33 tests, run against real fixture data
                   pulled from data.gov.sg — no network/API keys needed)
+render.yaml       Render Blueprint (free Web Service)
+Procfile          worker-process declaration (Railway, or any Procfile-based host)
 ```
 
 ## Known limitations / ideas for v2
@@ -116,3 +174,6 @@ tests/            pytest suite (31 tests, run against real fixture data
   only covers HDB) — URA's own carpark API could extend coverage.
 - No rate limiting on user commands — unlikely to matter for personal use,
   but worth adding if this ever gets shared publicly.
+- The Render free-tier deploy depends on an external pinger staying up
+  (see "Keep it awake" above) — it's not a guaranteed always-on setup the
+  way a paid worker plan would be.

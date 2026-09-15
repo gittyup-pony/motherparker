@@ -1,0 +1,20 @@
+# Render Blueprint — lets you deploy via "New +" -> "Blueprint" in the Render
+# dashboard instead of manually filling in build/start commands.
+#
+# This deploys as a free Web Service (plan: free). It only works as
+# "always on" if you also set up an external pinger (see README.md) to hit
+# the health endpoint every ~10 minutes — otherwise Render spins it down
+# after 15 minutes of no HTTP traffic, same as any other free web service.
+services:
+  - type: web
+    name: motopark-bot
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m motopark_bot.main
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: LTA_ACCOUNT_KEY
+        sync: false

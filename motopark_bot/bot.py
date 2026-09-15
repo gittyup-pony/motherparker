@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -9,6 +10,7 @@ from aiogram.types import Message
 
 from motopark_bot.config import get_settings
 from motopark_bot.formatting import format_check_results, format_nearest_results
+from motopark_bot.health import start_health_server
 from motopark_bot.lta_client import LiveAvailabilityStore
 from motopark_bot.matching import rank_matches
 from motopark_bot.nearest import find_nearest
@@ -88,15 +90,32 @@ async def run_bot() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
 
-    static_store = StaticCarparkStore(ttl_seconds=settings.static_data_ttl_seconds)
-    live_store = LiveAvailabilityStore(settings.lta_account_key, ttl_seconds=settings.live_data_ttl_seconds)
+    # Render always sets RENDER=true, but — unlike some other platforms —
+    # does NOT auto-inject $PORT for a custom startCommand service; it just
+    # expects the app to bind to port 10000 unless $PORT says otherwise. So
+    # we trigger on RENDER=true (falling back to $PORT alone in case some
+    # other host sets that without RENDER), defaulting to 10000. Railway
+    # workers, Oracle Cloud VMs, and local runs set neither, so this stays
+    # a no-op everywhere except Render's free Web Service tier. See health.py.
+    health_runner = None
+    port_env = os.environ.get("PORT")
+    if os.environ.get("RENDER") == "true" or port_env:
+        port = int(port_env) if port_env else 10000
+        health_runner = await start_health_server(port)
 
-    log.info("Priming static carpark dataset from data.gov.sg...")
-    await static_store.refresh(force=True)
-    log.info("Loaded %d carparks.", len(await static_store.all()))
+    try:
+        static_store = StaticCarparkStore(ttl_seconds=settings.static_data_ttl_seconds)
+        live_store = LiveAvailabilityStore(settings.lta_account_key, ttl_seconds=settings.live_data_ttl_seconds)
 
-    bot = Bot(token=settings.bot_token)
-    dp = build_dispatcher(static_store, live_store)
+        log.info("Priming static carpark dataset from data.gov.sg...")
+        await static_store.refresh(force=True)
+        log.info("Loaded %d carparks.", len(await static_store.all()))
 
-    log.info("Starting polling...")
-    await dp.start_polling(bot)
+        bot = Bot(token=settings.bot_token)
+        dp = build_dispatcher(static_store, live_store)
+
+        log.info("Starting polling...")
+        await dp.start_polling(bot)
+    finally:
+        if health_runner is not None:
+            await health_runner.cleanup()
