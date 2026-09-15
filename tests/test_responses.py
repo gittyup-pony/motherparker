@@ -17,7 +17,7 @@ from motopark_bot.datagovsg import parse_csv_text, parse_geojson
 from motopark_bot.lta_client import LiveAvailabilityStore, LiveLot, _parse_location
 from motopark_bot.responses import build_check_response, build_nearest_response
 from motopark_bot.static_data import StaticCarparkStore, _parse_record
-from motopark_bot.ura_data import UraCarparkStore, _build_capacity_index, _build_carparks
+from motopark_bot.ura_data import UraCarparkStore, _build_carparks
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -32,9 +32,11 @@ def _fresh_static_store() -> StaticCarparkStore:
 
 
 def _fresh_ura_store() -> UraCarparkStore:
-    locations = parse_geojson(json.loads((FIXTURES / "sample_ura_parking_lot.geojson.json").read_text()))
+    # Confirmed against real production data: the Capacity dataset alone
+    # has everything (name, location, capacity) - see ura_data.py's module
+    # docstring for why the old two-dataset join was dropped.
     capacity = parse_geojson(json.loads((FIXTURES / "sample_ura_capacity_clean.geojson.json").read_text()))
-    carparks = _build_carparks(locations, _build_capacity_index(capacity))
+    carparks = _build_carparks(capacity)
     store = UraCarparkStore()
     store._carparks = carparks
     store._fetched_at = time.monotonic()

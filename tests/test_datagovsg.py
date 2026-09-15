@@ -13,7 +13,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def test_parse_geojson_clean_properties():
     data = json.loads((FIXTURES / "sample_ura_capacity_clean.geojson.json").read_text())
     features = parse_geojson(data)
-    assert len(features) == 2
+    assert len(features) == 3
 
     f = features[0]
     assert f.lon == 103.8480

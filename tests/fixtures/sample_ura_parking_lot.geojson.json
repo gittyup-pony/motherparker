@@ -1,28 +1,29 @@
 {
   "type": "FeatureCollection",
+  "name": "URAParkingLot",
   "features": [
     {
       "type": "Feature",
-      "geometry": {"type": "Point", "coordinates": [103.8480, 1.3005]},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [103.77591041322351, 1.446183047079429],
+          [103.77588931849508, 1.446187562027974],
+          [103.7758874523271, 1.4461787145949154],
+          [103.77590854525822, 1.4461742014550654],
+          [103.77591041322351, 1.446183047079429]
+        ]]
+      },
       "properties": {
-        "PP_CODE": "SP0001",
-        "PARKING_PL": "ORCHARD ROAD CARPARK"
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {"type": "Point", "coordinates": [103.8600, 1.2950]},
-      "properties": {
-        "PP_CODE": "SP0002",
-        "PARKING_PL": "MARINA CARPARK"
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {"type": "Point", "coordinates": [103.7000, 1.3400]},
-      "properties": {
-        "PP_CODE": "SP0003",
-        "PARKING_PL": "NO CAPACITY DATA CARPARK"
+        "OBJECTID_1": 2327713,
+        "TYPE": "Motorcycle Lots",
+        "LOT_NO": null,
+        "PP_CODE": "M0079",
+        "PARKING_PL": "Marsiling Crescent Heavy Vehicle Park ",
+        "INC_CRC": "7008760EAD78B6CE",
+        "FMEL_UPD_D": "20231010150150",
+        "SHAPE_1.AREA": 2.39996044,
+        "SHAPE_1.LEN": 6.79984250766444
       }
     }
   ]

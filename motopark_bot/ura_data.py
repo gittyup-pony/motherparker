@@ -1,9 +1,24 @@
 """URA carparks: coordinates + motorcycle bay capacity (not live occupancy).
 
-Two data.gov.sg GeoJSON datasets, joined on PP_CODE:
-  - "URA Parking Lot" (d_d959102fa76d58f2de276bfbb7e8f68e) — locations
-  - "Capacity of URA Parking Places" (d_9bf8620ecfdc8a5f8f77e3f02160af5c) —
-    NO_CAR / NO_H_VEHIC / NO_MCYCLE per PP_CODE
+**Confirmed against real production data** (previously this was built
+against documentation only — see git history / README for the saga):
+
+  - "Capacity of URA Parking Places" (d_9bf8620ecfdc8a5f8f77e3f02160af5c)
+    is exactly what was originally assumed: one Point-geometry feature per
+    carpark FACILITY, with `PP_CODE`, `PARKING_PL` (name), and
+    `NO_CAR`/`NO_H_VEHIC`/`NO_MCYCLE` capacity counts. This is the only
+    dataset actually used now.
+  - "URA Parking Lot" (d_d959102fa76d58f2de276bfbb7e8f68e) turned out to
+    be something else entirely: ~38,700 Polygon-geometry features, one per
+    individual physical parking LOT (tagged `TYPE`, e.g. "Motorcycle
+    Lots"), not one point per facility. That's why the original
+    two-dataset join produced 0 usable carparks — `datagovsg.parse_geojson`
+    only keeps Point geometries, so every one of those Polygon features
+    was silently dropped, leaving nothing to join against. Since the
+    Capacity dataset alone already has everything this bot needs (name,
+    location, capacity), the join was dropped rather than fixed — this
+    constant is kept only as a documented dead end, in case per-lot detail
+    is ever wanted for something else.
 
 Important difference from static_data.py's HDB carparks: this gives total
 motorcycle BAY COUNT (how many exist), not live occupancy (how many are
@@ -32,20 +47,21 @@ from motopark_bot.datagovsg import fetch_geojson_features, fetch_raw_geojson
 
 log = logging.getLogger(__name__)
 
-PARKING_LOT_DATASET_ID = "d_d959102fa76d58f2de276bfbb7e8f68e"
 CAPACITY_DATASET_ID = "d_9bf8620ecfdc8a5f8f77e3f02160af5c"
 
-# See fetch_all_ura_carparks()/log_raw_feature_sample() below - data.gov.sg's
-# poll-download endpoint rate-limits (429) rapid successive calls, confirmed
-# in production. This is a courtesy delay between calls to the same
-# endpoint, not a substitute for fetch_download_url's retry-with-backoff.
+# Not used for parsing anymore (see module docstring) - kept only so the
+# diagnostic below can still confirm its shape if that's ever useful again.
+PARKING_LOT_DATASET_ID = "d_d959102fa76d58f2de276bfbb7e8f68e"
+
+# data.gov.sg's poll-download endpoint rate-limits (429) rapid successive
+# calls, confirmed in production. This is a courtesy delay between calls to
+# the same endpoint, not a substitute for fetch_download_url's
+# retry-with-backoff.
 _INTER_REQUEST_DELAY_SECONDS = 1.5
 
-# Field names as documented on data.gov.sg's dataset pages. Both datasets
-# are classic ArcGIS/SHP exports (short truncated attribute names), so
-# these are near-certainly right, but weren't confirmed against a live
-# sample — see datagovsg.py's HTML-table fallback and the module docstring
-# above.
+# Field names as they actually appear in the Capacity dataset - confirmed
+# against a real production sample (see module docstring), not just
+# documentation.
 _PP_CODE_KEYS = ("PP_CODE", "PP_Code", "pp_code")
 _NAME_KEYS = ("PARKING_PL", "PARKING_PLACE", "Parking_Place")
 _NO_MCYCLE_KEYS = ("NO_MCYCLE", "No_MCycle")
@@ -90,74 +106,48 @@ class UraCarpark:
         return self.name
 
 
-def _build_capacity_index(features: list) -> dict[str, tuple[int | None, int | None, int | None]]:
-    """Pure: GeoFeatures from the capacity dataset -> {pp_code: (car, heavy, mc)}."""
-    out: dict[str, tuple[int | None, int | None, int | None]] = {}
-    for feat in features:
-        pp_code = _first(feat.properties, _PP_CODE_KEYS)
-        if not pp_code:
-            continue
-        out[pp_code] = (
-            _to_int(_first(feat.properties, _NO_CAR_KEYS)),
-            _to_int(_first(feat.properties, _NO_H_VEHIC_KEYS)),
-            _to_int(_first(feat.properties, _NO_MCYCLE_KEYS)),
-        )
-    return out
-
-
-def _build_carparks(
-    location_features: list,
-    capacity_by_code: dict[str, tuple[int | None, int | None, int | None]],
-) -> list[UraCarpark]:
-    """Pure: joins location GeoFeatures with the capacity index -> UraCarparks.
+def _build_carparks(features: list) -> list[UraCarpark]:
+    """Pure: Capacity-dataset GeoFeatures -> UraCarparks, one per facility.
 
     Separated from the network-fetching fetch_all_ura_carparks() below so
-    the actual join/parse logic is directly unit-testable against fixture
-    data, without needing to fake out the HTTP layer.
+    the actual parse logic is directly unit-testable against fixture data,
+    without needing to fake out the HTTP layer.
     """
     carparks: list[UraCarpark] = []
-    for feat in location_features:
+    for feat in features:
         pp_code = _first(feat.properties, _PP_CODE_KEYS)
         name = _first(feat.properties, _NAME_KEYS)
         if not pp_code or not name:
             continue
-        car_cap, heavy_cap, mc_cap = capacity_by_code.get(pp_code, (None, None, None))
         carparks.append(
             UraCarpark(
                 pp_code=pp_code,
-                name=name,
+                name=name.strip(),  # real data has trailing whitespace on some names
                 lat=feat.lat,
                 lon=feat.lon,
-                motorcycle_capacity=mc_cap,
-                car_capacity=car_cap,
-                heavy_vehicle_capacity=heavy_cap,
+                motorcycle_capacity=_to_int(_first(feat.properties, _NO_MCYCLE_KEYS)),
+                car_capacity=_to_int(_first(feat.properties, _NO_CAR_KEYS)),
+                heavy_vehicle_capacity=_to_int(_first(feat.properties, _NO_H_VEHIC_KEYS)),
             )
         )
     return carparks
 
 
 async def fetch_all_ura_carparks() -> list[UraCarpark]:
-    locations = await fetch_geojson_features(PARKING_LOT_DATASET_ID)
-    # A short stagger before the second poll-download call, purely to
-    # reduce the odds of tripping data.gov.sg's rate limit in the first
-    # place (fetch_download_url's retry-with-backoff handles it either
-    # way, but avoiding the 429 is faster than recovering from it).
-    await asyncio.sleep(_INTER_REQUEST_DELAY_SECONDS)
-    capacity_features = await fetch_geojson_features(CAPACITY_DATASET_ID)
-    capacity_by_code = _build_capacity_index(capacity_features)
-    return _build_carparks(locations, capacity_by_code)
+    features = await fetch_geojson_features(CAPACITY_DATASET_ID)
+    return _build_carparks(features)
 
 
 class UraCarparkStore:
-    """In-memory cache of joined URA carpark data, long TTL (rarely changes).
+    """In-memory cache of URA carpark data, long TTL (rarely changes).
 
-    If the dataset can't be parsed at all (see the field-name caveat at the
-    top of this file), `_carparks` stays permanently empty, which makes
-    `_is_stale()` permanently True — without `_last_attempt_at`/
-    `retry_backoff_seconds` below, that means every single /check or
-    /nearest call would re-attempt the network fetch and re-raise, instead
-    of failing once and quietly staying "unavailable" for a while. This bit
-    the bot for real once (see git history) before this backoff was added.
+    If the dataset can't be parsed at all, `_carparks` stays permanently
+    empty, which makes `_is_stale()` permanently True — without
+    `_last_attempt_at`/`retry_backoff_seconds` below, that means every
+    single /check or /nearest call would re-attempt the network fetch and
+    re-raise, instead of failing once and quietly staying "unavailable"
+    for a while. This bit the bot for real once (see git history) before
+    this backoff was added.
     """
 
     def __init__(self, ttl_seconds: int = 24 * 60 * 60, retry_backoff_seconds: int = 300) -> None:
@@ -193,6 +183,11 @@ class UraCarparkStore:
 async def log_raw_feature_sample() -> None:
     """Diagnostic-only: log the ground-truth raw GeoJSON for both datasets.
 
+    Only the Capacity dataset is actually parsed now (see module
+    docstring), but this still checks the Parking Lot dataset too, purely
+    so a future schema change there would show up here rather than being
+    silently irrelevant.
+
     Render's free tier has no Shell tab, so `python -m motopark_bot.ura_data`
     (the smoke test below) isn't runnable interactively there - only the
     Logs tab is free. This does the same fetch but writes WARNING-level log
@@ -201,12 +196,11 @@ async def log_raw_feature_sample() -> None:
     restart/redeploy, without needing paid Shell access. Called from
     bot.py when priming ura_store fails at startup.
 
-    Called right after the main refresh already made 2 poll-download
-    calls, so this staggers its own 2 calls too (see
-    _INTER_REQUEST_DELAY_SECONDS) - confirmed in production that firing
-    requests back-to-back trips data.gov.sg's rate limit (429), which
-    would otherwise make the diagnostic itself fail before showing us
-    anything useful.
+    Called right after the main refresh already made a poll-download call,
+    so this staggers its own 2 calls too (see _INTER_REQUEST_DELAY_SECONDS)
+    - confirmed in production that firing requests back-to-back trips
+    data.gov.sg's rate limit (429), which would otherwise make the
+    diagnostic itself fail before showing us anything useful.
     """
     for i, (label, dataset_id) in enumerate((("Parking Lot", PARKING_LOT_DATASET_ID), ("Capacity", CAPACITY_DATASET_ID))):
         if i > 0:
@@ -228,9 +222,9 @@ async def log_raw_feature_sample() -> None:
 
 if __name__ == "__main__":
     # Manual smoke test: `python -m motopark_bot.ura_data`
-    # Confirms whether the field-name guesses above (PP_CODE, PARKING_PL,
-    # NO_MCYCLE, ...) and the clean-properties-vs-HTML-table parsing
-    # actually match what these two datasets return for real.
+    # Confirms the Capacity dataset still parses as expected (field names,
+    # Point geometry) - now confirmed against real data once already, but
+    # worth re-running if data.gov.sg ever changes the dataset shape.
     import asyncio
 
     async def main() -> None:

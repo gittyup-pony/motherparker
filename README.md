@@ -32,11 +32,17 @@ the combination none of the existing apps seem to do.
   backoff on a `429 Too Many Requests` from the poll-download endpoint
   (confirmed in production — see the URA diagnostic note below), honoring
   a `Retry-After` header when the server sends one.
-- `ura_data.py` fetches and caches URA's Parking Lot (location) and
-  Capacity (motorcycle/car/heavy-vehicle bay counts) datasets, joins them
-  on `PP_CODE`, and extends both `/check` and `/nearest` with carparks
-  outside the HDB dataset. See the verification caveat below — this one's
-  built against documented schema only, not a real sample.
+- `ura_data.py` fetches and caches URA's "Capacity of URA Parking Places"
+  dataset (name, location, and motorcycle/car/heavy-vehicle bay counts,
+  one row per carpark facility — confirmed against real production data),
+  extending both `/check` and `/nearest` with carparks outside the HDB
+  dataset. It used to join this against a second "URA Parking Lot"
+  dataset too, until production logs showed that one is actually a
+  ~38,700-feature per-*lot* Polygon layer, not per-facility points —
+  parsed to 0 usable records every time, since only Point geometries are
+  kept. Since the Capacity dataset alone already has everything needed,
+  the join was dropped. See the README history / `ura_data.py`'s module
+  docstring for the full story.
 - `carpark_rates_data.py` fetches and caches the Carpark Rates dataset
   (malls, hotels, attractions — parking price reference, no coordinates,
   no vehicle-type breakdown). It extends `/check` only (nothing to rank
@@ -73,13 +79,12 @@ I built this against documented schemas, but couldn't test live calls
 myself (no DataMall account, and this sandbox's network doesn't reach
 data.gov.sg/LTA anyway). These assumptions need a real check:
 
-> **Update from a real deploy:** item 3 below (URA field names) is now
-> confirmed wrong — production logs showed `Fetched 0 usable URA
-> carparks`. This no longer breaks the bot: `/check` and `/nearest` fall
-> back to HDB + Carpark Rates results and log a warning
-> (`URA carpark data unavailable for this request...`) instead of
-> crashing (see "Resilience" below for how). URA results just won't show
-> up until the field names are fixed — see item 3 for how to diagnose it.
+> **Update from a real deploy:** item 3 below (URA field names/shape) is
+> now resolved — see its entry for what production data actually showed
+> and how `ura_data.py` was fixed. While it was broken, the bot degraded
+> gracefully rather than crashing (`/check`/`/nearest` fell back to HDB +
+> Carpark Rates and logged a warning) — that resilience stays in place
+> for whatever's still unverified below (items 1, 2, 4, 5).
 
 1. **Which `LotType` code means motorcycle.** LTA's official API guide says
    `Y`, but I've seen a third-party source use `M` — I coded for both
@@ -100,46 +105,51 @@ It prints every distinct `LotType` seen and how many records matched the
 motorcycle guess — if that number looks wrong, fix `MOTORCYCLE_LOT_TYPES`
 in `lta_client.py` before relying on it.
 
-3. **URA dataset field names and GeoJSON shape.** I could not fetch actual
-   sample data for URA's Parking Lot / Capacity datasets — the sandbox's
-   `WebFetch` hit `403 PROXY_REJECTED` on the presigned S3 download URLs
-   data.gov.sg's API returned. `ura_data.py` is built strictly against the
-   *documented* field names (`PP_CODE`, `PARKING_PL`, `NO_MCYCLE`, etc.)
-   and assumes WGS84 `[lon, lat]` coordinates per the GeoJSON spec — and
-   this has now failed for real in production (`Fetched 0 usable URA
-   carparks`).
+3. **URA dataset field names and GeoJSON shape — RESOLVED.** I couldn't
+   fetch actual sample data while building this (the sandbox's `WebFetch`
+   hit `403 PROXY_REJECTED` on data.gov.sg's presigned S3 download URLs),
+   so it was built against documented field names only, joining two
+   datasets. In production, that join failed outright
+   (`Fetched 0 usable URA carparks`), and the diagnostic added to debug it
+   (`ura_data.log_raw_feature_sample()`, logged to Render's free **Logs**
+   tab — Shell is a paid Render feature, so this was the only option)
+   revealed two things once its own rate-limiting problem was fixed (see
+   the 429 note below):
+   - The **Capacity** dataset (`d_9bf8620ecfdc8a5f8f77e3f02160af5c`) was
+     exactly as documented: one `Point`-geometry feature per carpark
+     facility, with `PP_CODE`, `PARKING_PL` (name), and
+     `NO_CAR`/`NO_H_VEHIC`/`NO_MCYCLE` — confirmed correct.
+   - The **Parking Lot** dataset (`d_d959102fa76d58f2de276bfbb7e8f68e`)
+     was not what the name suggested: ~38,700 `Polygon`-geometry
+     features, one per individual physical parking *lot* (tagged
+     `TYPE`, e.g. `"Motorcycle Lots"`), not one point per facility.
+     `datagovsg.parse_geojson()` only keeps `Point` geometries, so every
+     one of those features was silently dropped — that's why the join
+     produced 0 usable carparks.
 
-   If you have Shell access (Render's paid plans, Railway, your own box),
-   run this — it prints how many carparks loaded and a couple of sample
-   records:
+   Since the Capacity dataset alone already has everything this bot
+   needs, `ura_data.py` no longer joins against Parking Lot at all — it's
+   simpler (one dataset fetch instead of two) and it works. See
+   `ura_data.py`'s module docstring for the full detail, and
+   `tests/fixtures/sample_ura_parking_lot.geojson.json` for a verbatim
+   copy of the real (Polygon) shape that caused this, kept as a
+   regression fixture.
 
-   ```bash
-   python -m motopark_bot.ura_data
-   ```
-
-   **On Render's free tier there's no Shell tab**, so instead, whenever
-   priming `ura_store` fails at startup, `bot.py` automatically calls
-   `ura_data.log_raw_feature_sample()`, which logs the raw (unparsed)
-   GeoJSON — feature count, geometry type, and the actual property keys —
-   at `WARNING` level. Check Render's **Logs** tab (free) after a
-   deploy/restart for lines starting `URA diagnostic [...]`. Whichever way
-   you get it, that output is exactly what's needed to fix the field-name
-   guesses in `ura_data.py`/`datagovsg.py` against the real dataset shape.
-
-   **Heads up — data.gov.sg's poll-download endpoint rate-limits (429)
-   rapid successive calls,** confirmed in production: a startup that
-   already fired 2 calls (for `ura_store`'s two datasets), followed
-   immediately by 2 more from this diagnostic, got a `429 Too Many
-   Requests` on the diagnostic's own first call — so the very thing meant
-   to explain the failure failed too. Fixed with a retry-with-backoff in
-   `datagovsg.fetch_download_url()` plus a short stagger between calls
-   (`ura_data._INTER_REQUEST_DELAY_SECONDS`), but if you ever see `429` in
-   the logs again, that's what it means — not a new bug.
-4. **Whether URA's `PP_CODE` ever matches an LTA `CarParkID`.** Unverified
-   like #2, but for the URA/LTA-agency pairing instead of HDB — if it
-   never matches, `/check` and `/nearest` results for URA carparks will
-   always show capacity instead of a live count (not broken, just less
-   precise; see `formatting.format_ura_carpark`'s fallback).
+   **Also found along the way — data.gov.sg's poll-download endpoint
+   rate-limits (429) rapid successive calls.** A single startup can fire
+   several calls to it back-to-back (2 for the old two-dataset join, plus
+   2 more from the diagnostic), which was enough to trip it — so the
+   diagnostic itself failed on the first attempt. Fixed with
+   retry-with-backoff in `datagovsg.fetch_download_url()` (honors
+   `Retry-After` when the server sends one) plus a short stagger between
+   calls; if `429` ever shows up in the logs again, that's what it means,
+   not a new bug.
+4. **Whether URA's `PP_CODE` ever matches an LTA `CarParkID`.** Still
+   unverified, same class of assumption as #2 but for the URA/LTA-agency
+   pairing instead of HDB — if it never matches, `/check` and `/nearest`
+   results for URA carparks will always show capacity instead of a live
+   count (not broken, just less precise; see
+   `formatting.format_ura_carpark`'s fallback).
 5. **Carpark Rates dataset.** Same S3-fetch limitation as URA. Run:
 
    ```bash
@@ -260,7 +270,7 @@ motopark_bot/
   health.py             decoy HTTP endpoint, active only when $PORT is set (Render)
   bot.py                aiogram handlers (thin wiring onto responses.py)
   main.py               entrypoint
-tests/            pytest suite (85 tests, run against fixture data — real
+tests/            pytest suite (86 tests, run against fixture data — real
                   fixtures for HDB/LTA pulled from data.gov.sg, synthetic
                   fixtures for URA/Carpark Rates since real samples
                   couldn't be fetched (see verification section above) —
