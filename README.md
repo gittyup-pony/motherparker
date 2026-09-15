@@ -22,8 +22,11 @@ A name/mall search (`/check jurong point`, `/check ang mo kio`) treats
 multi-word queries as one phrase — an address has to contain the whole
 sequence of words together, not just each word somewhere in it.
 
-Every result comes with a **🧭 Navigate** button that opens turn-by-turn
-directions to that carpark in Google Maps.
+Every reply comes with a **🧭 Navigate** button. With a single result it
+opens turn-by-turn directions to that carpark in Google Maps directly; with
+more than one, tapping it expands into one button per result, so you pick
+which carpark to navigate to instead of getting every option's button at
+once.
 
 ## How it works
 
@@ -89,9 +92,18 @@ directions to that carpark in Google Maps.
 - `maps.py` turns a `(lat, lon)` pair into a Google Maps directions URL
   (`https://www.google.com/maps/dir/?api=1&destination=...`) — no API key
   needed, opens the Google Maps app if installed or the website otherwise,
-  on any platform. `bot.py`'s `build_nav_keyboard()` turns each reply's
-  `nav_targets` into one inline "🧭 Navigate" button per result (labels
-  truncated to fit Telegram's 64-character button-text limit).
+  on any platform. `bot.py`'s `build_nav_keyboard()` turns a reply's
+  `nav_targets` into that first-seen keyboard: a single result links
+  straight out (`_expanded_nav_keyboard` with one button), more than one
+  collapses to a single "🧭 Navigate (*n* results)" button instead of
+  showing every option's button up front. Tapping it fires a
+  `callback_query` (`nav_menu_handler`) that expands it into one Google
+  Maps button per result (plus "‹ Back" to collapse again) — which result
+  list to expand comes from `_NavMenuStore`, an in-memory
+  `(chat_id, message_id) -> NavTarget list` map populated when the reply
+  was first sent, since Telegram's 64-byte `callback_data` has no room to
+  carry the whole list itself. Labels are truncated to fit Telegram's
+  64-character button-text limit either way.
 - `health.py` runs a tiny HTTP endpoint, but *only* when `RENDER=true` (or
   `$PORT`) is set — true on Render, false everywhere else this README
   covers. Render doesn't auto-inject `$PORT` for a custom start command,
@@ -343,7 +355,7 @@ motopark_bot/
   health.py             decoy HTTP endpoint, active only when $PORT is set (Render)
   bot.py                aiogram handlers (thin wiring onto responses.py)
   main.py               entrypoint
-tests/            pytest suite (115 tests, run against fixture data — real
+tests/            pytest suite (121 tests, run against fixture data — real
                   fixtures for HDB/LTA pulled from data.gov.sg, plus one
                   verbatim real URA sample (see verification section
                   above); synthetic fixtures for the rest — no network/API
@@ -362,7 +374,10 @@ Procfile          worker-process declaration (Railway, or any Procfile-based hos
   `formatting.py`'s output was trimmed.
 - No caching layer shared across bot restarts (in-memory only) — fine for
   a single-instance personal bot, would need Redis/similar if you ever
-  scale this to multiple workers.
+  scale this to multiple workers. The "Navigate" picker's pending-menu
+  store (`_NavMenuStore` in `bot.py`) is the same story: a restart between
+  sending a multi-result reply and tapping its Navigate button just means
+  that one tap needs a fresh `/check`/`/nearest`, not a crash.
 - `/nearest` now covers HDB + URA carparks (URA's dataset extends coverage
   beyond HDB, per "How it works" above), but Carpark Rates entries never
   appear there — that dataset has no coordinates, so they only show up in

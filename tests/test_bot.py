@@ -12,7 +12,11 @@ import pytest
 from motopark_bot.bot import (
     BOT_COMMANDS,
     START_TEXT,
+    _NAV_BACK_CALLBACK,
     _NAV_LABEL_MAX_CHARS,
+    _NAV_MENU_CALLBACK,
+    _expanded_nav_keyboard,
+    _NavMenuStore,
     _prime_optional_store,
     build_dispatcher,
     build_nav_keyboard,
@@ -69,10 +73,12 @@ async def test_prime_optional_store_returns_false_and_does_not_raise_on_failure(
     assert await _prime_optional_store("thing", broken()) is False
 
 
-# --- build_nav_keyboard() -----------------------------------------------
+# --- build_nav_keyboard() / _expanded_nav_keyboard() ---------------------
 # Turns responses.py's plain NavTarget data into the "🧭 Navigate" inline
-# buttons under /check and /nearest replies (see the AskUserQuestion
-# decision to go with Google Maps buttons over native location pins).
+# buttons under /check and /nearest replies. A single result links
+# straight to Google Maps; more than one collapses to a single "Navigate"
+# button that expands into a picker on tap (see nav_menu_handler in
+# build_dispatcher), rather than showing every option's button at once.
 
 
 def test_build_nav_keyboard_returns_none_for_no_targets():
@@ -81,25 +87,61 @@ def test_build_nav_keyboard_returns_none_for_no_targets():
     assert build_nav_keyboard([]) is None
 
 
-def test_build_nav_keyboard_one_button_per_target():
+def test_build_nav_keyboard_single_target_links_straight_to_maps():
+    # Nothing to choose between with only one result - no picker step.
+    targets = [NavTarget(label="ALBERT CENTRE", lat=1.301059, lon=103.855409)]
+    markup = build_nav_keyboard(targets)
+    assert markup is not None
+    assert len(markup.inline_keyboard) == 1
+    button = markup.inline_keyboard[0][0]
+    assert "ALBERT CENTRE" in button.text
+    assert button.url == "https://www.google.com/maps/dir/?api=1&destination=1.301059,103.855409"
+    assert button.callback_data is None
+
+
+def test_build_nav_keyboard_multiple_targets_collapses_to_one_button():
     targets = [
         NavTarget(label="ALBERT CENTRE", lat=1.301059, lon=103.855409),
         NavTarget(label="ORCHARD ROAD CARPARK", lat=1.3005, lon=103.848),
     ]
     markup = build_nav_keyboard(targets)
     assert markup is not None
-    # adjust(1) - one button per row.
-    assert len(markup.inline_keyboard) == 2
+    assert len(markup.inline_keyboard) == 1
+    button = markup.inline_keyboard[0][0]
+    assert "Navigate" in button.text
+    assert "2" in button.text
+    assert button.callback_data == _NAV_MENU_CALLBACK
+    assert button.url is None  # not a direct maps link - taps expand the picker
+
+
+def test_expanded_nav_keyboard_one_button_per_target():
+    targets = [
+        NavTarget(label="ALBERT CENTRE", lat=1.301059, lon=103.855409),
+        NavTarget(label="ORCHARD ROAD CARPARK", lat=1.3005, lon=103.848),
+    ]
+    markup = _expanded_nav_keyboard(targets, with_back=True)
+    # 2 result buttons + 1 "back" button, one per row (adjust(1)).
+    assert len(markup.inline_keyboard) == 3
     assert all(len(row) == 1 for row in markup.inline_keyboard)
 
     first_button = markup.inline_keyboard[0][0]
     assert "ALBERT CENTRE" in first_button.text
     assert first_button.url == "https://www.google.com/maps/dir/?api=1&destination=1.301059,103.855409"
 
+    back_button = markup.inline_keyboard[-1][0]
+    assert back_button.callback_data == _NAV_BACK_CALLBACK
+    assert back_button.url is None
 
-def test_build_nav_keyboard_truncates_long_labels_within_telegram_limit():
+
+def test_expanded_nav_keyboard_without_back_button():
+    targets = [NavTarget(label="ALBERT CENTRE", lat=1.301059, lon=103.855409)]
+    markup = _expanded_nav_keyboard(targets, with_back=False)
+    assert len(markup.inline_keyboard) == 1  # no extra "back" row
+
+
+def test_expanded_nav_keyboard_truncates_long_labels_within_telegram_limit():
     long_name = "A" * 100
-    markup = build_nav_keyboard([NavTarget(label=long_name, lat=1.0, lon=103.0)])
+    markup = _expanded_nav_keyboard([NavTarget(label=long_name, lat=1.0, lon=103.0)], with_back=False)
     label = markup.inline_keyboard[0][0].text
     # Telegram's hard cap is 64 UTF-16 code units; this module truncates
     # well before that (_NAV_LABEL_MAX_CHARS), so both bounds must hold.
@@ -108,11 +150,40 @@ def test_build_nav_keyboard_truncates_long_labels_within_telegram_limit():
     assert label.endswith("…")
 
 
-def test_build_nav_keyboard_strips_whitespace_from_label():
-    markup = build_nav_keyboard([NavTarget(label="  Marsiling Crescent Heavy Vehicle Park  ", lat=1.0, lon=103.0)])
+def test_expanded_nav_keyboard_strips_whitespace_from_label():
+    targets = [NavTarget(label="  Marsiling Crescent Heavy Vehicle Park  ", lat=1.0, lon=103.0)]
+    markup = _expanded_nav_keyboard(targets, with_back=False)
     label = markup.inline_keyboard[0][0].text
     assert not label.endswith(" ")
     assert "Marsiling Crescent" in label
+
+
+# --- _NavMenuStore --------------------------------------------------------
+# Server-side (chat_id, message_id) -> NavTarget list, since callback_data
+# is too small to carry a whole picker's worth of results itself.
+
+
+def test_nav_menu_store_put_then_get():
+    store = _NavMenuStore()
+    targets = [NavTarget(label="ALBERT CENTRE", lat=1.3, lon=103.85)]
+    store.put(chat_id=1, message_id=42, nav_targets=targets)
+    assert store.get(chat_id=1, message_id=42) == targets
+
+
+def test_nav_menu_store_get_missing_returns_none():
+    store = _NavMenuStore()
+    assert store.get(chat_id=1, message_id=42) is None
+
+
+def test_nav_menu_store_evicts_oldest_beyond_max_size():
+    store = _NavMenuStore(max_size=2)
+    store.put(1, 1, [NavTarget(label="A", lat=1.0, lon=103.0)])
+    store.put(1, 2, [NavTarget(label="B", lat=1.0, lon=103.0)])
+    store.put(1, 3, [NavTarget(label="C", lat=1.0, lon=103.0)])
+
+    assert store.get(1, 1) is None  # evicted - oldest, beyond max_size
+    assert store.get(1, 2) is not None
+    assert store.get(1, 3) is not None
 
 
 # --- build_dispatcher() wiring -------------------------------------------

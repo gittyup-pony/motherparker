@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import OrderedDict
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from motopark_bot.carpark_rates_data import CarparkRatesStore
@@ -22,7 +23,7 @@ from motopark_bot.health import start_health_server
 from motopark_bot.lta_client import LiveAvailabilityStore
 from motopark_bot.maps import maps_url
 from motopark_bot.onemap import OneMapClient
-from motopark_bot.responses import NavTarget, build_check_response, build_nearest_response
+from motopark_bot.responses import BotReply, NavTarget, build_check_response, build_nearest_response
 from motopark_bot.static_data import StaticCarparkStore
 from motopark_bot.ura_data import UraCarparkStore, log_raw_feature_sample
 
@@ -30,6 +31,15 @@ from motopark_bot.ura_data import UraCarparkStore, log_raw_feature_sample
 # addresses/names routinely run longer than that, so labels get truncated
 # to this before the "🧭 " prefix and a trailing "…" are added.
 _NAV_LABEL_MAX_CHARS = 40
+
+# Callback data for the two-step "Navigate" picker (see _NavMenuStore and
+# build_nav_keyboard below): tapping the single "Navigate" button on a
+# multi-result reply expands it into one button per result; "‹ Back"
+# collapses it again. Fixed strings, not per-request IDs - which specific
+# reply they apply to comes from the callback's own message (chat_id,
+# message_id), looked up in _NavMenuStore.
+_NAV_MENU_CALLBACK = "navmenu"
+_NAV_BACK_CALLBACK = "navback"
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +49,8 @@ START_TEXT = (
     "*/check <name or postal code>* — look up a carpark by name or a 6-digit "
     "postal code, e.g. `/check jurong point` or `/check 238801`\n"
     "*/nearest* — then share your location, to see the closest carparks\n\n"
-    "Each result comes with a 🧭 *Navigate* button that opens directions in Google Maps.\n\n"
+    "Each result comes with a 🧭 *Navigate* button. With more than one "
+    "result, tap it to pick which carpark to open in Google Maps.\n\n"
     "Data: LTA DataMall (live lots), data.gov.sg HDB Carpark Information "
     "(pricing), URA carpark capacity, and Carpark Rates (malls/hotels)."
 )
@@ -56,25 +67,80 @@ BOT_COMMANDS = [
 ]
 
 
+def _nav_button_label(target: NavTarget) -> str:
+    label = f"🧭 {target.label.strip()}"
+    if len(label) > _NAV_LABEL_MAX_CHARS:
+        label = label[: _NAV_LABEL_MAX_CHARS - 1] + "…"
+    return label
+
+
+def _expanded_nav_keyboard(nav_targets: list[NavTarget], with_back: bool) -> InlineKeyboardMarkup:
+    """One Google Maps URL button per result - the picker's "open" step.
+
+    `with_back` adds a "‹ Back" button that collapses back to the single
+    "Navigate" button (see build_nav_keyboard) - used for a multi-result
+    reply, where the user reached this view by tapping it. A single-result
+    reply reuses this too (via build_nav_keyboard) but skips the back
+    button, since there's no collapsed view to go back to.
+    """
+    builder = InlineKeyboardBuilder()
+    for target in nav_targets:
+        builder.button(text=_nav_button_label(target), url=maps_url(target.lat, target.lon))
+    if with_back:
+        builder.button(text="‹ Back", callback_data=_NAV_BACK_CALLBACK)
+    builder.adjust(1)  # one per row - labels are full names/addresses, too wide for 2-up
+    return builder.as_markup()
+
+
 def build_nav_keyboard(nav_targets: list[NavTarget]) -> InlineKeyboardMarkup | None:
-    """One "🧭 Navigate" button per result that has coordinates.
+    """The nav keyboard as it first appears on a /check or /nearest reply.
 
     Returns None (no reply_markup at all) when there's nothing to link to -
     e.g. a /check reply that matched only Carpark Rates entries, which have
-    no coordinates (see responses.py). Each button opens Google Maps
-    directions to that carpark (see maps.py) - tapping it hands off to
-    whatever maps app is installed, or the Google Maps website otherwise.
+    no coordinates (see responses.py). With exactly one result, there's
+    nothing to choose between, so this links straight to Google Maps like
+    before. With more than one, this collapses to a single "🧭 Navigate"
+    button rather than one button per result - tapping it expands into the
+    per-result picker (see nav_menu_handler in build_dispatcher), so the
+    user picks a specific carpark before landing on a maps link instead of
+    being handed every option at once.
     """
     if not nav_targets:
         return None
+    if len(nav_targets) == 1:
+        return _expanded_nav_keyboard(nav_targets, with_back=False)
     builder = InlineKeyboardBuilder()
-    for target in nav_targets:
-        label = f"🧭 {target.label.strip()}"
-        if len(label) > _NAV_LABEL_MAX_CHARS:
-            label = label[: _NAV_LABEL_MAX_CHARS - 1] + "…"
-        builder.button(text=label, url=maps_url(target.lat, target.lon))
-    builder.adjust(1)  # one per row - labels are full names/addresses, too wide for 2-up
+    builder.button(text=f"🧭 Navigate ({len(nav_targets)} results)", callback_data=_NAV_MENU_CALLBACK)
     return builder.as_markup()
+
+
+class _NavMenuStore:
+    """(chat_id, message_id) -> that reply's NavTarget list.
+
+    Telegram's callback_query handlers get the message a button was
+    attached to for free, but not the data that built its keyboard - and
+    there's no room to encode a whole NavTarget list into callback_data's
+    64-byte limit. This holds it server-side instead, in memory only, like
+    every other cache in this bot (see README's "Known limitations") - a
+    restart just means a picker mid-tap needs a fresh /check or /nearest,
+    not a crash. Bounded FIFO so a long-running bot doesn't grow this
+    unboundedly; any picker a user actually taps is used within seconds of
+    being sent, long before eviction would matter.
+    """
+
+    def __init__(self, max_size: int = 200) -> None:
+        self._max_size = max_size
+        self._by_key: OrderedDict[tuple[int, int], list[NavTarget]] = OrderedDict()
+
+    def put(self, chat_id: int, message_id: int, nav_targets: list[NavTarget]) -> None:
+        key = (chat_id, message_id)
+        self._by_key[key] = nav_targets
+        self._by_key.move_to_end(key)
+        while len(self._by_key) > self._max_size:
+            self._by_key.popitem(last=False)
+
+    def get(self, chat_id: int, message_id: int) -> list[NavTarget] | None:
+        return self._by_key.get((chat_id, message_id))
 
 
 def build_dispatcher(
@@ -85,6 +151,17 @@ def build_dispatcher(
     onemap_client: OneMapClient | None = None,
 ) -> Dispatcher:
     dp = Dispatcher()
+    nav_menus = _NavMenuStore()
+
+    async def _send_reply_with_nav(message: Message, reply: BotReply) -> None:
+        sent = await message.answer(
+            reply.text, parse_mode="Markdown", reply_markup=build_nav_keyboard(reply.nav_targets)
+        )
+        # Only multi-result replies use the picker (see build_nav_keyboard) -
+        # a single-result reply's button already links straight out, so
+        # there's nothing for nav_menu_handler to ever look up for it.
+        if len(reply.nav_targets) > 1:
+            nav_menus.put(sent.chat.id, sent.message_id, reply.nav_targets)
 
     @dp.message(Command("start", "help"))
     async def start_handler(message: Message) -> None:
@@ -112,9 +189,7 @@ def build_dispatcher(
             nearest_result_count=settings.nearest_result_count,
             nearest_max_radius_km=settings.nearest_max_radius_km,
         )
-        await message.answer(
-            reply.text, parse_mode="Markdown", reply_markup=build_nav_keyboard(reply.nav_targets)
-        )
+        await _send_reply_with_nav(message, reply)
 
     @dp.message(Command("nearest"))
     async def nearest_prompt_handler(message: Message) -> None:
@@ -138,9 +213,31 @@ def build_dispatcher(
             limit=settings.nearest_result_count,
             max_radius_km=settings.nearest_max_radius_km,
         )
-        await message.answer(
-            reply.text, parse_mode="Markdown", reply_markup=build_nav_keyboard(reply.nav_targets)
-        )
+        await _send_reply_with_nav(message, reply)
+
+    @dp.callback_query(F.data == _NAV_MENU_CALLBACK)
+    async def nav_menu_handler(callback: CallbackQuery) -> None:
+        # Expands the single "Navigate" button into one per result - see
+        # build_nav_keyboard's docstring for why this is two steps.
+        message = callback.message
+        targets = nav_menus.get(message.chat.id, message.message_id) if message else None
+        if not targets:
+            await callback.answer(
+                "This menu's expired - send /check or /nearest again.", show_alert=True
+            )
+            return
+        await message.edit_reply_markup(reply_markup=_expanded_nav_keyboard(targets, with_back=True))
+        await callback.answer()
+
+    @dp.callback_query(F.data == _NAV_BACK_CALLBACK)
+    async def nav_back_handler(callback: CallbackQuery) -> None:
+        message = callback.message
+        targets = nav_menus.get(message.chat.id, message.message_id) if message else None
+        if not targets:
+            await callback.answer()
+            return
+        await message.edit_reply_markup(reply_markup=build_nav_keyboard(targets))
+        await callback.answer()
 
     return dp
 
