@@ -2,21 +2,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Generic, Protocol, TypeVar
 
 from motopark_bot.geo import haversine_km
-from motopark_bot.static_data import CarparkInfo
+
+
+class Locatable(Protocol):
+    """What find_nearest() needs: CarparkInfo and UraCarpark both satisfy
+    this, so one ranking function works across both HDB and URA carparks
+    (RateEntry doesn't — it has no coordinates, so it's /check-only)."""
+
+    lat: float
+    lon: float
+
+
+T = TypeVar("T", bound=Locatable)
 
 
 @dataclass(frozen=True)
-class RankedCarpark:
-    info: CarparkInfo
+class RankedCarpark(Generic[T]):
+    info: T
     distance_km: float
 
 
 def find_nearest(
     lat: float,
     lon: float,
-    carparks: list[CarparkInfo],
+    carparks: list[T],
     limit: int = 5,
     max_radius_km: float | None = None,
 ) -> list[RankedCarpark]:

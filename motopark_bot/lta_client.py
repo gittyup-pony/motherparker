@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from motopark_bot.matching import _tokenize, score_text_match
+
 BASE_URL = "https://datamall2.mytransport.sg/ltaodataservice/CarParkAvailabilityv2"
 PAGE_SIZE = 500
 
@@ -134,6 +136,31 @@ class LiveAvailabilityStore:
     async def all_motorcycle_lots(self) -> list[LiveLot]:
         await self.refresh()
         return list(self._by_carpark_id.values())
+
+    async def find_by_development_name(self, query: str, limit: int = 3) -> list[LiveLot]:
+        """Best-effort live lookup for carparks with no CarParkID to join on.
+
+        Used for carpark_rates_data.py's RateEntry (Carpark Rates has no
+        carpark ID at all) — fuzzy-matches `query` against each live
+        record's `development` name using the same scoring as matching.py's
+        rank_matches. Only ever finds something for carparks LTA's own feed
+        covers directly (Orchard/Marina/HarbourFront/Jurong Lake District
+        malls, per LTA's dataset description — see README).
+        """
+        await self.refresh()
+        q = query.strip()
+        if not q:
+            return []
+        q_upper = q.upper()
+        q_tokens = _tokenize(q)
+
+        scored: list[tuple[float, LiveLot]] = []
+        for lot in self._by_carpark_id.values():
+            score = score_text_match(q_upper, q_tokens, lot.development)
+            if score > 0:
+                scored.append((score, lot))
+        scored.sort(key=lambda t: -t[0])
+        return [lot for _, lot in scored[:limit]]
 
 
 if __name__ == "__main__":

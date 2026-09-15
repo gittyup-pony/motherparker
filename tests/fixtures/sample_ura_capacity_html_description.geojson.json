@@ -1,0 +1,13 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [103.8480, 1.3005]},
+      "properties": {
+        "Name": "SP0001",
+        "Description": "<table><tr><th>OBJECTID_1</th><td>1</td></tr><tr><th>PP_CODE</th><td>SP0001</td></tr><tr><th>PARKING_PL</th><td>ORCHARD ROAD CARPARK</td></tr><tr><th>NO_CAR</th><td>250</td></tr><tr><th>NO_H_VEHIC</th><td>5</td></tr><tr><th>NO_MCYCLE</th><td>40</td></tr></table>"
+      }
+    }
+  ]
+}

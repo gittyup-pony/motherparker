@@ -1,0 +1,33 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [103.8480, 1.3005]},
+      "properties": {
+        "OBJECTID_1": "1",
+        "PP_CODE": "SP0001",
+        "PARKING_PL": "ORCHARD ROAD CARPARK",
+        "NO_CAR": "250",
+        "NO_H_VEHIC": "5",
+        "NO_MCYCLE": "40",
+        "INC_CRC": "abc123",
+        "FMEL_UPD_D": "20250101"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [103.8600, 1.2950]},
+      "properties": {
+        "OBJECTID_1": "2",
+        "PP_CODE": "SP0002",
+        "PARKING_PL": "MARINA CARPARK",
+        "NO_CAR": "180",
+        "NO_H_VEHIC": "2",
+        "NO_MCYCLE": "0",
+        "INC_CRC": "def456",
+        "FMEL_UPD_D": "20250101"
+      }
+    }
+  ]
+}

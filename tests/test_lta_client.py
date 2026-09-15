@@ -81,3 +81,41 @@ async def test_live_store_raises_if_no_motorcycle_lots_seen_at_all(monkeypatch):
     store = LiveAvailabilityStore(account_key="fake")
     with pytest.raises(RuntimeError, match="MOTORCYCLE_LOT_TYPES"):
         await store.refresh(force=True)
+
+
+@pytest.mark.asyncio
+async def test_find_by_development_name_matches_and_ranks(monkeypatch):
+    # Same fake fetch as the grouping test above - reused inline since it's
+    # only a few lines and keeps this test self-contained.
+    async def fake_fetch_all_live_lots(account_key: str):
+        records = FIXTURE["value"]
+        lots = []
+        for rec in records:
+            loc = _parse_location(rec["Location"])
+            lots.append(
+                lta_client.LiveLot(
+                    car_park_id=rec["CarParkID"],
+                    development=rec["Development"],
+                    lat=loc[0],
+                    lon=loc[1],
+                    available_lots=int(rec["AvailableLots"]),
+                    lot_type=rec["LotType"],
+                    agency=rec["Agency"],
+                )
+            )
+        return lots
+
+    monkeypatch.setattr(lta_client, "fetch_all_live_lots", fake_fetch_all_live_lots)
+
+    store = LiveAvailabilityStore(account_key="fake")
+
+    # "ALBERT CENTRE" is in ACB's Development string in the fixture.
+    results = await store.find_by_development_name("albert centre")
+    assert results
+    assert results[0].car_park_id == "ACB"
+
+    # No match anywhere in any Development string.
+    assert await store.find_by_development_name("nonexistent mall xyz") == []
+
+    # Empty query never matches everything.
+    assert await store.find_by_development_name("") == []

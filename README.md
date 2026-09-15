@@ -2,8 +2,10 @@
 
 Telegram bot for finding motorcycle parking in Singapore: live lot counts
 (via LTA DataMall) plus sheltered/unsheltered and free/paid info (via
-data.gov.sg's HDB Carpark Information dataset) — the combination none of
-the existing apps seem to do.
+data.gov.sg's HDB Carpark Information dataset), extended with URA's
+motorcycle-capacity dataset (more carparks, no live join always available)
+and the Carpark Rates dataset (malls/hotels/attractions, price reference) —
+the combination none of the existing apps seem to do.
 
 **Commands:**
 - `/check <name>` — look up a specific carpark by name, e.g. `/check jurong point`
@@ -16,20 +18,45 @@ the existing apps seem to do.
   gives shelter type (`car_park_type`), free/paid (`free_parking`), night
   parking, and coordinates (converted from SVY21 to lat/lon in `geo.py`).
 - `lta_client.py` polls LTA DataMall's `CarParkAvailabilityv2` for live lot
-  counts, filtered to motorcycle lots, cached with a 45s TTL.
-- The two are joined on carpark ID (HDB's `car_park_no` == LTA's
-  `CarParkID` for HDB-agency records) to answer both commands.
+  counts, filtered to motorcycle lots, cached with a 45s TTL. It joins to
+  HDB by exact `CarParkID`, and also exposes
+  `find_by_development_name()` — a fuzzy text match against live
+  `Development` names, used for sources with no ID to join on (Carpark
+  Rates, below).
+- `datagovsg.py` is a shared fetch helper for data.gov.sg's modern
+  `poll-download` API (used for GeoJSON/CSV file-based datasets, as
+  opposed to the older `datastore_search` API `static_data.py` uses). It
+  handles two GeoJSON shapes defensively: clean top-level `properties`,
+  or the legacy ArcGIS-export shape where the real fields are packed into
+  an HTML `<table>` inside a `Description` property.
+- `ura_data.py` fetches and caches URA's Parking Lot (location) and
+  Capacity (motorcycle/car/heavy-vehicle bay counts) datasets, joins them
+  on `PP_CODE`, and extends both `/check` and `/nearest` with carparks
+  outside the HDB dataset. See the verification caveat below — this one's
+  built against documented schema only, not a real sample.
+- `carpark_rates_data.py` fetches and caches the Carpark Rates dataset
+  (malls, hotels, attractions — parking price reference, no coordinates,
+  no vehicle-type breakdown). It extends `/check` only (nothing to rank
+  by distance without coordinates), with live lot counts attempted via
+  `lta_client.find_by_development_name()` fuzzy-matching.
+- `matching.py` and `nearest.py` are written generically (Python
+  `Protocol`/`TypeVar`) so the same ranking logic works across all three
+  static-data types without duplication.
+- `responses.py` merges results from all applicable sources per command,
+  joins each against live data where possible, and formats the combined
+  reply — pulled out of `bot.py` so this logic (the most complex part of
+  the bot now) is unit-testable without simulating Telegram objects.
 - `health.py` runs a tiny HTTP endpoint, but *only* when `RENDER=true` (or
   `$PORT`) is set — true on Render, false everywhere else this README
   covers. Render doesn't auto-inject `$PORT` for a custom start command,
   it just expects port 10000 by default, so that's what this defaults to.
   See "Deploy to Render" below for why it exists.
 
-## ⚠️ Two things to verify once you have a real API key
+## ⚠️ Things to verify once you have a real API key
 
-I built this against LTA's documented schema, but couldn't test live calls
+I built this against documented schemas, but couldn't test live calls
 myself (no DataMall account, and this sandbox's network doesn't reach
-data.gov.sg/LTA anyway). Two assumptions need a real check:
+data.gov.sg/LTA anyway). These assumptions need a real check:
 
 1. **Which `LotType` code means motorcycle.** LTA's official API guide says
    `Y`, but I've seen a third-party source use `M` — I coded for both
@@ -49,6 +76,39 @@ LTA_ACCOUNT_KEY=your_key_here python -m motopark_bot.lta_client
 It prints every distinct `LotType` seen and how many records matched the
 motorcycle guess — if that number looks wrong, fix `MOTORCYCLE_LOT_TYPES`
 in `lta_client.py` before relying on it.
+
+3. **URA dataset field names and GeoJSON shape.** I could not fetch actual
+   sample data for URA's Parking Lot / Capacity datasets — the sandbox's
+   `WebFetch` hit `403 PROXY_REJECTED` on the presigned S3 download URLs
+   data.gov.sg's API returned. `ura_data.py` is built strictly against the
+   *documented* field names (`PP_CODE`, `PARKING_PL`, `NO_MCYCLE`, etc.)
+   and assumes WGS84 `[lon, lat]` coordinates per the GeoJSON spec — none
+   of that has been checked against a real response. Run this once you're
+   deployed (no API key needed, it's a public dataset):
+
+   ```bash
+   python -m motopark_bot.ura_data
+   ```
+
+   It prints how many carparks loaded, and a couple of sample records —
+   if the names/capacities look wrong or empty, the field-name or
+   HTML-table-fallback assumptions in `ura_data.py`/`datagovsg.py` need
+   adjusting.
+4. **Whether URA's `PP_CODE` ever matches an LTA `CarParkID`.** Unverified
+   like #2, but for the URA/LTA-agency pairing instead of HDB — if it
+   never matches, `/check` and `/nearest` results for URA carparks will
+   always show capacity instead of a live count (not broken, just less
+   precise; see `formatting.format_ura_carpark`'s fallback).
+5. **Carpark Rates dataset.** Same S3-fetch limitation as URA. Run:
+
+   ```bash
+   python -m motopark_bot.carpark_rates_data
+   ```
+
+   to confirm rows parse as expected. Also worth knowing going in: this
+   dataset (as of when it was last checked) is itself stale — roughly
+   2018-era rates — so treat `/check` results from it as a rough price
+   reference, not current pricing.
 
 ## Setup
 
@@ -145,18 +205,25 @@ self-managed box like Oracle Cloud's Always Free tier).
 
 ```
 motopark_bot/
-  config.py       env var loading (get_settings())
-  geo.py          SVY21->WGS84 conversion, haversine distance
-  static_data.py  HDB Carpark Information fetch/cache (shelter, free/paid)
-  lta_client.py   LTA DataMall live motorcycle-lot polling/cache
-  matching.py     text search ranking for /check
-  nearest.py      distance-based ranking for /nearest
-  formatting.py   Telegram message formatting shared by both commands
-  health.py       decoy HTTP endpoint, active only when $PORT is set (Render)
-  bot.py          aiogram handlers
-  main.py         entrypoint
-tests/            pytest suite (33 tests, run against real fixture data
-                  pulled from data.gov.sg — no network/API keys needed)
+  config.py            env var loading (get_settings())
+  geo.py                SVY21->WGS84 conversion, haversine distance
+  static_data.py        HDB Carpark Information fetch/cache (shelter, free/paid)
+  lta_client.py         LTA DataMall live motorcycle-lot polling/cache
+  datagovsg.py          shared poll-download fetch helper (GeoJSON/CSV datasets)
+  ura_data.py           URA motorcycle-capacity dataset fetch/cache
+  carpark_rates_data.py Carpark Rates (malls/hotels/attractions) fetch/cache
+  matching.py           generic text search ranking for /check
+  nearest.py            generic distance-based ranking for /nearest
+  formatting.py         Telegram message formatting, one formatter per source
+  responses.py          merges all sources into the /check and /nearest replies
+  health.py             decoy HTTP endpoint, active only when $PORT is set (Render)
+  bot.py                aiogram handlers (thin wiring onto responses.py)
+  main.py               entrypoint
+tests/            pytest suite (62 tests, run against fixture data — real
+                  fixtures for HDB/LTA pulled from data.gov.sg, synthetic
+                  fixtures for URA/Carpark Rates since real samples
+                  couldn't be fetched (see verification section above) —
+                  no network/API keys needed either way)
 render.yaml       Render Blueprint (free Web Service)
 Procfile          worker-process declaration (Railway, or any Procfile-based host)
 ```
@@ -169,9 +236,17 @@ Procfile          worker-process declaration (Railway, or any Procfile-based hos
 - No caching layer shared across bot restarts (in-memory only) — fine for
   a single-instance personal bot, would need Redis/similar if you ever
   scale this to multiple workers.
-- `/nearest` only searches HDB carparks (LTA/URA carparks are technically
-  in the live feed too, but the static shelter/pricing dataset used here
-  only covers HDB) — URA's own carpark API could extend coverage.
+- `/nearest` now covers HDB + URA carparks (URA's dataset extends coverage
+  beyond HDB, per "How it works" above), but Carpark Rates entries never
+  appear there — that dataset has no coordinates, so they only show up in
+  `/check`.
+- URA carparks shown via `/check`/`/nearest` fall back to showing total
+  motorcycle *capacity* rather than a live count whenever the live feed
+  doesn't join to them (see verification items #3–4 above) — still useful,
+  but worth knowing it's not always live.
+- Carpark Rates entries rely on fuzzy name-matching against the live feed
+  (no ID to join on) and the rates themselves may be stale — treat as a
+  price reference, not a live-availability source.
 - No rate limiting on user commands — unlikely to matter for personal use,
   but worth adding if this ever gets shared publicly.
 - The Render free-tier deploy depends on an external pinger staying up
